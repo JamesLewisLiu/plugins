@@ -1,0 +1,1067 @@
+let music_db, course_db, score_db, data_db, appeal_db;
+let volforceArray = [];
+let profile_data, skill_data;
+let baseTBodyCMpD, baseTBodyCMpL, baseTBodyGpD, baseTBodyGpL, baseTBodyASpL;
+let notFirst = false;
+let versionText = ['', 'BOOTH', 'INFINTE INFECTION', 'GRAVITY WARS', 'HEAVENLY HAVEN', 'VIVIDWAVE', 'EXCEED GEAR']
+
+function createArray(length) {
+    let arr = new Array(length || 0),
+        i = length;
+    arr.fill(0);
+    if (arguments.length > 1) {
+        let args = Array.prototype.slice.call(arguments, 1);
+        while (i--) arr[length - 1 - i] = createArray.apply(this, args);
+    }
+
+    return arr;
+}
+
+function zeroPad(num, places) {
+    let zero = places - num.toString().length + 1;
+    return Array(+(zero > 0 && zero)).join("0") + num;
+}
+
+function arraybuffer_emit(event, data) {
+    return axios.post(`/emit/${event}`, data ?? {},{responseType: 'arraybuffer', timeout: 3000000});
+}
+
+const GRAPHICS_BASE_PATH = 'data/graphics';
+
+function toGraphicsPath(urlOrPath) {
+    if (!urlOrPath) return urlOrPath;
+    if (urlOrPath.startsWith('static/asset/')) {
+        return `${GRAPHICS_BASE_PATH}/${urlOrPath.substring('static/asset/'.length)}`;
+    }
+    if (urlOrPath.startsWith('data/graphics/')) {
+        return `${GRAPHICS_BASE_PATH}/${urlOrPath.substring('data/graphics/'.length)}`;
+    }
+    return urlOrPath;
+}
+
+// Cache blob URLs so repeated re-renders don't refetch the same asset.
+const assetBlobUrlCache = new Map();
+
+async function getOrCreateAssetBlobUrl(urlOrPath) {
+    const path = toGraphicsPath(urlOrPath);
+    if (!path) return null;
+
+    const cached = assetBlobUrlCache.get(path);
+    if (cached) return cached;
+
+    try {
+        const res = await arraybuffer_emit('getAssetData', { path });
+        const data = res?.data;
+        if (!data) return null;
+
+        const blobUrl = URL.createObjectURL(new Blob([data], { type: 'image/png' }));
+        assetBlobUrlCache.set(path, blobUrl);
+        return blobUrl;
+    } catch (_) {
+        return null;
+    }
+}
+
+window.addEventListener('beforeunload', () => {
+    for (const blobUrl of assetBlobUrlCache.values()) {
+        try {
+            URL.revokeObjectURL(blobUrl);
+        } catch (_) {}
+    }
+    assetBlobUrlCache.clear();
+});
+
+async function setImgSrcFromAsset(imgEl, urlOrPath) {
+    if (!imgEl) return;
+    const blobUrl = await getOrCreateAssetBlobUrl(urlOrPath);
+    imgEl.setAttribute('src', blobUrl ?? urlOrPath);
+}
+
+function isEmptyJson(value) {
+    if (value === null || value === undefined) return true;
+    if (Array.isArray(value)) return value.length === 0;
+    if (typeof value === 'object') return Object.keys(value).length === 0;
+    return false;
+}
+
+function hideUiBlocker() {
+    const blocker = document.querySelector('.uiblocker');
+    if (!blocker) return;
+
+    blocker.classList.add('fade');
+    window.setTimeout(() => {
+        blocker.style.display = 'none';
+    }, 600);
+}
+
+function showLoadError(message) {
+    hideUiBlocker();
+
+    const loadingText = document.querySelector('#loading_text');
+    if (loadingText) loadingText.textContent = 'Error loading data.';
+
+    const errorLineId = 'load_error_line';
+    const container = document.querySelector('#test') || document.body;
+    let errorLine = document.querySelector(`#${errorLineId}`);
+    if (!errorLine) {
+        errorLine = document.createElement('p');
+        errorLine.id = errorLineId;
+        errorLine.className = 'has-text-danger';
+        errorLine.style.whiteSpace = 'pre-wrap';
+        container.prepend(errorLine);
+    }
+
+    errorLine.textContent = message;
+    try {
+        $('#test').show();
+    } catch (_) {
+        // ignore (jQuery not available / #test missing)
+    }
+}
+
+function formatAxiosError(err) {
+    const status = err?.response?.status;
+    const statusText = err?.response?.statusText;
+    const detail = err?.response?.data?.message || err?.message;
+    if (status) return `HTTP ${status}${statusText ? ' ' + statusText : ''}${detail ? `: ${detail}` : ''}`;
+    return detail || 'unknown error';
+}
+
+function loadJson(url, label) {
+    return new Promise((resolve, reject) => {
+        $.getJSON(url)
+            .done((json) => {
+                if (isEmptyJson(json)) {
+                    reject(new Error(`${label} returned empty JSON.`));
+                    return;
+                }
+                resolve(json);
+            })
+            .fail((jqxhr, textStatus, errorThrown) => {
+                const status = jqxhr?.status;
+                const statusText = jqxhr?.statusText;
+                const extra = errorThrown || textStatus || 'unknown error';
+                reject(new Error(`Failed to load ${label}${status ? ` (HTTP ${status}${statusText ? ' ' + statusText : ''})` : ''}: ${extra}`));
+            });
+    });
+}
+
+function loadMusicDb() {
+    return axios
+        .post('/emit/getMusicDB')
+        .then((response) => {
+            const data = response?.data;
+            if (isEmptyJson(data)) {
+                throw new Error('Music DB returned empty JSON.');
+            }
+            return data;
+        })
+        .catch((err) => {
+            throw new Error(`Failed to load Music DB: ${formatAxiosError(err)}`);
+        });
+}
+
+
+function getSkillAsset(skill) {
+    return "static/asset/skill_lv/skill_" + zeroPad(skill, 2) + ".png";
+}
+
+function getGrade(grade) {
+    switch (grade) {
+        case 0:
+            return 0;
+        case 1:
+            return 0.80;
+        case 2:
+            return 0.82;
+        case 3:
+            return 0.85;
+        case 4:
+            return 0.88;
+        case 5:
+            return 0.91;
+        case 6:
+            return 0.94;
+        case 7:
+            return 0.97;
+        case 8:
+            return 1.00;
+        case 9:
+            return 1.02;
+        case 10:
+            return 1.05;
+    }
+}
+
+function getMedal(clear) {
+    switch (clear) {
+        case 0:
+            return 0;
+        case 1:
+            return 0.5;
+        case 2:
+            return 1.0;
+        case 3:
+            return 1.02;
+        case 4:
+            return 1.05;
+        case 5:
+            return 1.10;
+    }
+}
+
+function getAppealCard(appeal) {
+    let result = appeal_db["appeal_card_data"]["card"].filter(object => object["@id"] == appeal);
+    return "data/graphics/ap_card/" + result[0]["info"]["texture"] + ".png"
+}
+
+function getSongLevel(musicid, type) {
+    //console.log(music_db["mdb"]["music"])
+    // console.log(musicid + " " + type);
+    // console.log(musicid)
+    let result = music_db["mdb"]["music"].filter(object => object["@attr"]["id"] == musicid);
+    // console.log(result[0]["difficulty"]["novice"]["difnum"]["#text"])
+    if (result.length == 0) {
+        return "1"
+    }
+
+    let diffnum = 0;
+
+    switch (type) {
+        case 0:
+            if (result[0]["difficulty"]["novice"] !== undefined)
+                diffnum = result[0]["difficulty"]["novice"]["difnum"]["@content"]
+                // return result[0]["difficulty"]["novice"]["difnum"]["#text"]
+            break;
+        case 1:
+            if (result[0]["difficulty"]["advanced"] !== undefined)
+                diffnum = result[0]["difficulty"]["advanced"]["difnum"]["@content"]
+                // return result[0]["difficulty"]["advanced"]["difnum"]["#text"]
+            break;
+        case 2:
+            if (result[0]["difficulty"]["exhaust"] !== undefined)
+                diffnum = result[0]["difficulty"]["exhaust"]["difnum"]["@content"]
+                // return result[0]["difficulty"]["exhaust"]["difnum"]["#text"]
+            break;
+        case 3:
+            if (result[0]["difficulty"]["infinite"] !== undefined)
+                diffnum = result[0]["difficulty"]["infinite"]["difnum"]["@content"]
+                // return result[0]["difficulty"]["infinite"]["difnum"]["#text"]
+            break;
+        case 4:
+            if (result[0]["difficulty"]["maximum"] !== undefined)
+                diffnum = result[0]["difficulty"]["maximum"]["difnum"]["@content"]
+                // return result[0]["difficulty"]["maximum"]["difnum"]["#text"]
+            break;
+        case 5:
+            if (result[0]["difficulty"]["ultimate"] !== undefined)
+                diffnum = result[0]["difficulty"]["ultimate"]["difnum"]["@content"]
+                // return result[0]["difficulty"]["ultimate"]["difnum"]["#text"]
+            break;
+    }
+    // console.log(diffnum)
+    if (diffnum == 0) {
+        diffnum = 1;
+    }
+
+    
+    diffnum /= 10;
+    
+
+    // console.log(diffnum)
+    return diffnum;
+    // return result[0]["info"]["title_name"]
+    //console.log(result);
+}
+
+function getVFLevel(VF) {
+    // console.log(VF);
+    switch (true) {
+        case VF < 10:
+            return zeroPad(1, 2);
+        case VF < 12:
+            return zeroPad(2, 2);
+        case VF < 14:
+            return zeroPad(3, 2);
+        case VF < 15:
+            return zeroPad(4, 2);
+        case VF < 16:
+            return zeroPad(5, 2);
+        case VF < 17:
+            return zeroPad(6, 2);
+        case VF < 18:
+            return zeroPad(7, 2);
+        case VF < 19:
+            return zeroPad(8, 2);
+        case VF < 20:
+            return zeroPad(9, 2);
+        case VF >= 20:
+            return zeroPad(10, 2);
+    }
+}
+
+function getAkaname(akaname) {
+    //let result = music_db["mdb"]["music"].filter(object => object["@id"] == musicid);
+    let result = data_db["akaname"].filter(obj => obj["value"] == akaname)[0];
+    // console.log(result);
+    return result["name"];
+}
+
+function getVFAsset(vf) {
+    let floatVF = parseFloat(vf);
+    return "static/asset/force/em6_" + getVFLevel(floatVF) + "_i_eab.png"
+}
+
+function singleScoreVolforce(score) {
+    // lv * (score / 10000000) * gradeattr * clearmedalattr * 2
+    let level = getSongLevel(score.mid, score.type);
+    // console.log(level);
+    let tempVF = parseFloat(level) * (parseInt(score.score) / 10000000) * getGrade(score.grade) * getMedal(score.clear) * 2;
+    // console.log(tempVF);
+    return tempVF;
+}
+
+function toFixed(num, fixed) {
+    let re = new RegExp('^-?\\d+(?:\.\\d{0,' + (fixed || -1) + '})?');
+    return num.toString().match(re)?.[0] ?? '0.0';
+}
+
+function calculateVolforce() {
+    for (let i in score_db) {
+        let temp = singleScoreVolforce(score_db[i]);
+        temp = parseFloat(toFixed(temp, 1));
+        volforceArray.push(temp);
+    }
+    volforceArray.sort(function(a, b) { return b - a });
+    // console.log(volforceArray);
+    let VF = 0;
+    if (volforceArray.length > 50) {
+        for (let i = 0; i < 50; i++) {
+            VF += volforceArray[i];
+        }
+    } else {
+        for (const element of volforceArray) {
+            VF += element;
+        }
+    }
+    VF /= 100;
+    // console.log(toFixed(VF, 3));
+    return toFixed(VF, 3);
+}
+
+let diffName = ["NOV", "ADV", "EXH", "INF\nGRV\nHVN\nVVD\nXCD", "MXM"];
+
+function preSetTableMark(type) {
+    $('#statistic-table').empty();
+    $('#statistic-table').append(
+        $('<thead>').append(
+            $('<tr>').append(
+                $('<th>').append(
+                    type
+                )
+            ).append(
+                $('<th>').append(
+                    "Played"
+                )
+            ).append(
+                $('<th>').append(
+                    "Clear"
+                )
+            ).append(
+                $('<th>').append(
+                    "Hard Clear"
+                )
+            ).append(
+                $('<th>').append(
+                    "UC"
+                )
+            ).append(
+                $('<th>').append(
+                    "PUC"
+                )
+            )
+        )
+    )
+}
+
+function preSetTableGrade(type) {
+    $('#statistic-table').empty();
+    $('#statistic-table').append(
+        $('<thead>').append(
+            $('<tr>').append(
+                $('<th>').append(
+                    type
+                )
+            ).append(
+                $('<th>').append(
+                    "D"
+                )
+            ).append(
+                $('<th>').append(
+                    "C"
+                )
+            ).append(
+                $('<th>').append(
+                    "B"
+                )
+            ).append(
+                $('<th>').append(
+                    "A"
+                )
+            ).append(
+                $('<th>').append(
+                    "A+"
+                )
+            ).append(
+                $('<th>').append(
+                    "AA"
+                )
+            ).append(
+                $('<th>').append(
+                    "AA+"
+                )
+            ).append(
+                $('<th>').append(
+                    "AAA"
+                )
+            ).append(
+                $('<th>').append(
+                    "AAA+"
+                )
+            ).append(
+                $('<th>').append(
+                    "S"
+                )
+            )
+        )
+    )
+}
+
+function preSetTableAvg(type) {
+    $('#statistic-table').empty();
+    $('#statistic-table').append(
+        $('<thead>').append(
+            $('<tr>')
+            .append($('<th>').append(type))
+            .append($('<th>').append('Average Score'))
+        )
+    );
+}
+
+
+function setCMpD() {
+    if ($('[name="cmpd"]').hasClass('is-active') && notFirst) {
+        return;
+    }
+    $('[name="cmpd"]').addClass('is-active');
+    $('[name="cmpl"]').removeClass('is-active');
+    $('[name="gpd"]').removeClass('is-active');
+    $('[name="gpl"]').removeClass('is-active');
+    $('[name="aspl"]').removeClass('is-active');
+    notFirst = true;
+
+    $('#statistic-table').fadeOut(200, function() {
+        preSetTableMark("Difficulty");
+        $('#statistic-table').append(baseTBodyCMpD)
+            .removeClass("is-narrow")
+            .css('width', '45%');
+        $('#statistic-table').fadeIn(200);
+    })
+
+
+
+}
+
+function setCMpL() {
+    if ($('[name="cmpl"]').hasClass('is-active')) {
+        return;
+    }
+    $('[name="cmpd"]').removeClass('is-active');
+    $('[name="cmpl"]').addClass('is-active');
+    $('[name="gpd"]').removeClass('is-active');
+    $('[name="gpl"]').removeClass('is-active');
+    $('[name="aspl"]').removeClass('is-active');
+
+    $('#statistic-table').fadeOut(200, function() {
+        preSetTableMark("Level");
+        //let tableBody = $('#tbodyin');
+        $('#statistic-table').append(baseTBodyCMpL)
+            .removeClass("is-narrow")
+            .css('width', '45%');
+        $('#statistic-table').fadeIn(200);
+    })
+}
+
+function setGpD() {
+    if ($('[name="gpd"]').hasClass('is-active')) {
+        return;
+    }
+    $('[name="cmpd"]').removeClass('is-active');
+    $('[name="cmpl"]').removeClass('is-active');
+    $('[name="gpd"]').addClass('is-active');
+    $('[name="gpl"]').removeClass('is-active');
+    $('[name="aspl"]').removeClass('is-active');
+
+    $('#statistic-table').fadeOut(200, function() {
+            preSetTableGrade("Difficulty");
+            $('#statistic-table').append(baseTBodyGpD)
+                .removeClass("is-narrow")
+                .css('width', '45%');
+            $('#statistic-table').fadeIn(200);
+        })
+        //$('#statistic-table').empty();
+}
+
+function setGpL() {
+    if ($('[name="gpl"]').hasClass('is-active')) {
+        return;
+    }
+    $('[name="cmpd"]').removeClass('is-active');
+    $('[name="cmpl"]').removeClass('is-active');
+    $('[name="gpd"]').removeClass('is-active');
+    $('[name="gpl"]').addClass('is-active');
+    $('[name="aspl"]').removeClass('is-active');
+    $('#statistic-table').fadeOut(200, function() {
+            preSetTableGrade("Level");
+            $('#statistic-table').append(baseTBodyGpL)
+                .removeClass("is-narrow")
+                .css('width', '45%');
+            $('#statistic-table').fadeIn(200);
+        })
+        //$('#statistic-table').empty();
+}
+
+function setASpL() {
+    if ($('[name="aspl"]').hasClass('is-active')) {
+        return;
+    }
+    $('[name="cmpd"]').removeClass('is-active');
+    $('[name="cmpl"]').removeClass('is-active');
+    $('[name="gpd"]').removeClass('is-active');
+    $('[name="gpl"]').removeClass('is-active');
+    $('[name="aspl"]').addClass('is-active');
+    $('#statistic-table').fadeOut(200, function() {
+            preSetTableAvg('Level');
+            $('#statistic-table').append(baseTBodyASpL)
+                .addClass("is-narrow")
+                .css('width', '30%');
+            $('#statistic-table').fadeIn(200);
+        })
+        //$('#statistic-table').empty();
+}
+
+
+function getAvg(array, lv) {
+    if (array[lv - 1][0] == 0) {
+        return 0;
+    } else {
+        return parseInt(array[lv - 1][1] / array[lv - 1][0]);
+    }
+}
+
+
+function setUpStatistics() {
+    baseTBodyCMpD = $('<tbody>');
+    baseTBodyCMpL = $('<tbody>');
+    baseTBodyGpL = $('<tbody>');
+    baseTBodyGpD = $('<tbody>');
+    baseTBodyASpL = $('<tbody>');
+
+    let CMpDArray = createArray(5, 5);
+    let CMpLArray = createArray(20, 5);
+    let GpDArray = createArray(5, 10);
+    let GpLArray = createArray(20, 10);
+    let ASpLArray = createArray(20, 2);
+
+    score_db.forEach(function(currentValue, index, array) {
+        //console.log(currentValue);
+        const type = Number(currentValue.type);
+        if (!Number.isFinite(type) || type < 0 || type >= 5) {
+            return;
+        }
+
+        const clear = Number(currentValue.clear);
+        const clearIndex = Number.isFinite(clear) ? clear - 1 : -1;
+
+        const rawLevel = parseInt(getSongLevel(currentValue.mid, type), 10);
+        let level = Number.isFinite(rawLevel) ? rawLevel : 1;
+        if (level < 1) level = 1;
+        if (level > 20) level = 20;
+        const levelIndex = level - 1;
+
+        const grade = Number(currentValue.grade);
+        const gradeIndex = Number.isFinite(grade) ? grade - 1 : -1;
+
+        if (clearIndex >= 0 && clearIndex < 5) {
+            CMpDArray[type][clearIndex] += 1;
+            CMpLArray[levelIndex][clearIndex] += 1;
+        }
+
+        if (gradeIndex >= 0 && gradeIndex < 10) {
+            GpDArray[type][gradeIndex] += 1;
+            GpLArray[levelIndex][gradeIndex] += 1;
+        }
+
+        ASpLArray[levelIndex][0] += 1;
+        ASpLArray[levelIndex][1] += Number(currentValue.score) || 0;
+    });
+
+    // console.log(CMpDArray);
+    // console.log(CMpLArray);
+    // console.log(GpDArray);
+    // console.log(GpLArray);
+    // console.log(ASpLArray);
+    for (let diff = 0; diff < 5; diff++) {
+        baseTBodyCMpD.append(
+            $('<tr>').append(
+                $('<th>').append(
+                    diffName[diff]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpDArray[diff][0]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpDArray[diff][1]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpDArray[diff][2]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpDArray[diff][3]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpDArray[diff][4]
+                )
+            )
+        )
+    }
+    for (let lv = 1; lv <= 20; lv++) {
+        baseTBodyCMpL.append(
+            $('<tr>').append(
+                $('<th>').append(
+                    lv
+                )
+            ).append(
+                $('<td>').append(
+                    CMpLArray[lv - 1][0]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpLArray[lv - 1][1]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpLArray[lv - 1][2]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpLArray[lv - 1][3]
+                )
+            ).append(
+                $('<td>').append(
+                    CMpLArray[lv - 1][4]
+                )
+            )
+        )
+    }
+    for (let diff = 0; diff < 5; diff++) {
+        baseTBodyGpD.append(
+            $('<tr>').append(
+                $('<th>').append(
+                    diffName[diff]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][0]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][1]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][2]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][3]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][4]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][5]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][6]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][7]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][8]
+                )
+            ).append(
+                $('<td>').append(
+                    GpDArray[diff][9]
+                )
+            )
+        )
+    }
+
+    for (let lv = 1; lv <= 20; lv++) {
+        baseTBodyGpL.append(
+            $('<tr>').append(
+                $('<th>').append(
+                    lv
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][0]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][1]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][2]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][3]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][4]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][5]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][6]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][7]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][8]
+                )
+            ).append(
+                $('<td>').append(
+                    GpLArray[lv - 1][9]
+                )
+            )
+        )
+    }
+    for (let lv = 1; lv <= 20; lv++) {
+        baseTBodyASpL.append(
+            $('<tr>').append(
+                $('<th>').append(
+                    lv
+                )
+            )
+            .append(
+                $('<td>').append(
+                    getAvg(ASpLArray, lv)
+                )
+            )
+        );
+    }
+}
+
+// $('cmpd').on('click', function(e) {
+//     //setCMpD();
+//     $('cmpdli').addClass('is-active');
+// })
+
+// $('cmpl').on('click', function(e) {
+//     //setCMpD();
+//     $('cmplli').addClass('is-active');
+// })
+// $('gpd').on('click', function(e) {
+//     //setCMpD();
+//     $('gpdli').addClass('is-active');
+// })
+// $('gpl').on('click', function(e) {
+//     //setCMpD();
+//     $('gplli').addClass('is-active');
+// })
+
+$('#version_select').change(function() {
+    $('#skillLV').fadeOut(200, () => {
+        console.log("change version select");
+        $('#skillLV').attr('src', getSkillAsset(getPlayerSkill($('#version_select').val())))
+    });
+    $('#skillLV').fadeIn(200);
+});
+
+
+function getPlayerSkill(version) {
+    // console.log(getPlayerMaxVersion())
+    if (skill_data.length == 0) return 0;
+    let k = skill_data.filter(e => e.version == version);
+    if (k.length === 0 || k[0] == undefined) return 0;
+    return parseInt(k[0].level);
+}
+
+function getVersionSelect() {
+    if (skill_data.length == 0) return [];
+    let versionDATA = [];
+    for (const element of skill_data) {
+        versionDATA.push(parseInt(element.version));
+    }
+    return versionDATA;
+}
+
+$(function() {
+    profile_data = JSON.parse(document.getElementById("data-pass").innerText);
+    score_db = JSON.parse(document.getElementById("score-pass").innerText);
+    skill_data = JSON.parse(document.getElementById("skill-pass").innerText);
+
+    skill_data.sort(function(a, b) {
+            return b.version - a.version;
+        })
+        // console.log(score_db);
+
+    // $('#test').append(
+    //     $('<div>').append(
+    //         profile_data["name"]
+    //     ).css('font-family', "testfont")
+    //     .css('font-size', "35px")
+    // )
+
+    Promise.all([
+        loadMusicDb().then((json) => {
+            music_db = json;
+        }),
+        loadJson("static/asset/json/course_data.json", 'course_data.json').then((json) => {
+            course_db = json;
+        }),
+        loadJson("static/asset/json/data.json", 'data.json').then((json) => {
+            data_db = json;
+        }),
+        loadJson("static/asset/json/appeal.json", 'appeal.json').then((json) => {
+            appeal_db = json;
+        }),
+    ])
+    .then(function() {
+        let currentVF = parseFloat(calculateVolforce()).toFixed(3);
+        let maxVer;
+        if(skill_data[0] != undefined){
+            maxVer = parseInt(skill_data[0]["version"])
+        }else{
+            maxVer = 6;
+        }
+
+        let versionInfo = getVersionSelect();
+        console.log(versionInfo);
+        for (const element of versionInfo) {
+            console.log(element)
+            $('#version_select').append(
+                $('<option>', {
+                    value: element,
+                    text: versionText[element],
+                })
+            )
+        }
+
+        $('#test').append(
+            $('<div class="card is-inlineblocked">').append(
+                $('<div class="card-header">').append(
+                    $('<p class="card-header-title">').append(
+                        $('<span class="icon">').append(
+                            $('<i class="mdi mdi-account-edit">')
+                        )
+                    ).append("Basic Data")
+                )
+            ).append(
+                $('<div class="card-content">').append(
+                    $('<div class="tile is-ancestor is-centered">').append(
+                        $('<div class="tile is-parent is-3">').append(
+                            $('<article class="tile is-child">').append(
+                                (() => {
+                                    const img = $('<img>');
+                                    setImgSrcFromAsset(img[0], getAppealCard(profile_data.appeal));
+                                    return img;
+                                })()
+                                .css('width', '150px')
+                            ).css('vertical-align', 'middle')
+                        )
+                    ).append(
+                        $('<div class="tile is-parent is-6">').append(
+                            $('<article class="tile is-child">').append(
+                                $('<div>').append(
+                                    $('<div>').append("Player Name:").css('font-size', '15').append($('<br>'))
+                                ).append(
+                                    $('<div>').append(profile_data["name"]).css('font-size', "35px")
+                                ).append(
+                                    $('<div>').append("Akaname:").css('font-size', '15')
+                                ).append(
+                                    $('<div>').append(getAkaname(profile_data["akaname"])).css('font-size', "35px")
+                                )
+                                .css('font-family', "testfont,ffff")
+                            )
+                        )
+                    ).append(
+                        $('<div class="tile is-parent is-3">').append(
+                            $('<article class="tile is-child is-centered">').append(
+                                $('<div>').append(
+                                    $('<img>').attr('src', getVFAsset(currentVF)).css('width', '7em')
+                                    .css('margin', '0 auto')
+                                ).append(
+                                    $('<div>').append(
+                                        currentVF
+                                    ).css('font-family', "testfont")
+                                    .css('font-size', "35px")
+                                    .css('text-align', 'center')
+                                )
+                                .css('vertical-align', 'middle')
+                                .css('min-height', '100%')
+                                .css('height', '100%')
+                            )
+                        )
+                    )
+                ).append(
+                    $('<div>').append(
+
+                    ).append(
+
+                    ).append(
+
+                    ).css("display", "table")
+                    .css('width', '100%')
+                    .css('text-align', 'left')
+                ).css('width', '100%')
+            ).css('vertical-align', 'top')
+            .css('max-width', '100%')
+        ).append(
+            $('<div class="card  is-inlineblocked">').append(
+                $('<div class="card-header">').append(
+                    $('<p class="card-header-title">').append(
+                        $('<span class="icon">').append(
+                            $('<i class="mdi mdi-pulse">')
+                        )
+                    ).append("Other Data")
+                )
+            ).append(
+                $('<div class="card-content">').append(
+                    $('<div class="tile is-ancestor">').append(
+                        $('<div class="tile is-parent is-7">').append(
+                            $('<article class="tile is-child box">').append(
+                                $('<p class="title">').append(
+                                    "Skill Level"
+                                ).append(
+                                    $('<div class="content">').append(
+                                        $('<img id="skillLV">').attr('src', getSkillAsset(getPlayerSkill(maxVer)))
+                                    )
+                                ).css('font-family', "testfont")
+                            )
+                        )
+                    ).append(
+                        $('<div class="tile is-parent is-5">').append(
+                            $('<article class="tile is-child box">').append(
+                                $('<p class="title">').append(
+                                    "PCB"
+                                ).append(
+                                    $('<div class="content">').append(
+                                        profile_data.blocks
+                                    )
+                                ).css('font-family', "testfont")
+                            )
+                        )
+                    ).css('vertical-align', 'middle')
+                )
+            )
+        ).append(
+            $('<div class="card">').append(
+                $('<div class="card-header">').append(
+                    $('<p class="card-header-title">').append(
+                        $('<span class="icon">').append(
+                            $('<i class="mdi mdi-pulse">')
+                        )
+                    ).append("Statistics")
+                )
+            ).append(
+                $('<div class="card-content">').append(
+                    $('<div class="tabs is-toggle is-paddingless is-centered is-fullwidth">').append(
+                        $('<ul class="is-marginless">').append(
+                            $('<li class="is-active" name="cmpd">').append(
+                                $('<a onclick="setCMpD()">').append(
+                                    "Clear Mark per Difficulty"
+                                )
+                            )
+                        ).append(
+                            $('<li name="cmpl">').append(
+                                $('<a onclick="setCMpL()">').append(
+                                    "Clear Mark per Level"
+                                )
+                            )
+                        ).append(
+                            $('<li name="gpd">').append(
+                                $('<a onclick="setGpD()">').append(
+                                    "Grade per Difficulty"
+                                )
+                            )
+                        ).append(
+                            $('<li name="gpl">').append(
+                                $('<a onclick="setGpL()">').append(
+                                    "Grade per Level"
+                                )
+                            )
+                        ).append(
+                            $('<li name="aspl">').append(
+                                $('<a onclick="setASpL()">').append(
+                                    'Average Score per Level'
+                                )
+                            )
+                        )
+                    )
+                ).append(
+                    $('<hr>')
+                ).append(
+                    $('<div class="tile is-ancestor">').append(
+                        $('<div class="tile is-parent">').append(
+                            $('<article class="tile is-child">').append(
+                                // $('<div class="table-container">').append(
+                                $('<table class="table mx-auto is-fullwidth is-hoverable" id="statistic-table">')
+                                .css('margin-left', 'auto')
+                                .css('margin-right', 'auto')
+                                // .css('width', '100%')
+                                // )
+                            ) //.css('text-align', 'center')
+                            .css('overflow-x', 'auto')
+                        )
+                    )
+
+                )
+            )
+        )
+
+        setUpStatistics();
+        setCMpD();
+
+        document.querySelector('.uiblocker').classList.toggle('fade');
+        $('#test').fadeIn(1000);
+    })
+    .catch((err) => {
+        showLoadError(err?.message ? err.message : String(err));
+    });
+
+
+
+})
