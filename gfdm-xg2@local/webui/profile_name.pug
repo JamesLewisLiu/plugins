@@ -1,0 +1,19 @@
+//DATA//
+  profile: DB.FindOne(refid, { collection: 'profile' })
+
+section.section
+  if profile
+    h3.title.is-4 GuitarFreaks / DrumMania XG2
+    form(method="post" action="/emit/xg2-change-name")
+      input(type="hidden" name="refid" value=refid)
+      .field
+        label.label Player name
+        .control
+          input.input(type="text" name="name" value=profile.name maxlength="12" required)
+        p.help Up to 12 characters. The new name is used on the next profile read.
+      .field
+        .control
+          button.button.is-primary(type="submit") Save name
+  else
+    article.message.is-warning
+      .message-body No GuitarFreaks / DrumMania XG2 profile exists for this card.
