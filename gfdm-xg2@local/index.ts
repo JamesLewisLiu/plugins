@@ -114,6 +114,14 @@ export function register() {
     default: true,
     needRestart: false,
   });
+  R.Config('cooperation_challenge_completion', {
+    name: 'Cooperation Challenge completion',
+    desc: 'completed reports each group challenge at its goal so the cleared state and already-granted prizes display; progression keeps real totals only.',
+    type: 'string',
+    default: 'completed',
+    options: ['completed', 'progression'],
+    needRestart: false,
+  });
   R.Config('append_festival_mode', {
     name: 'APPEND FESTIVAL state',
     desc: 'Archived event state; ended keeps its reward normally available.',

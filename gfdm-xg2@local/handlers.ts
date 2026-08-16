@@ -1,4 +1,4 @@
-type Profile = {
+﻿type Profile = {
   collection: 'profile';
   did?: number;
   groupId?: number;
@@ -379,6 +379,24 @@ const COOPERATION_EVENT_IDS: { [gameCode: string]: number[] } = {
     14, 15, 6, 17, 27, 19, 20, 21, 22, 23, 24, 25, 26,
   ],
 };
+// Completion goals recovered verbatim from data/product/xml/coop_data.xml.
+// The client compares the group_coope total_score of each event against these
+// goals to drive the Group Challenge progress display and its reward grant
+// path (game.dll sub_10078DD0 -> sub_1011BAA0).
+const COOPERATION_GOALS: { [gameCode: string]: { [eventId: number]: number } } = {
+  K33: {
+    1: 13000, 2: 50, 3: 50, 4: 50, 5: 21097, 16: 10000, 7: 18000, 8: 200,
+    9: 30, 10: 2000, 11: 30, 12: 50, 13: 250, 14: 30, 15: 5000, 6: 30000,
+    17: 50, 18: 200, 19: 80000, 20: 200, 21: 10000, 22: 50, 23: 1000,
+    24: 2000, 25: 15000, 26: 300,
+  },
+  K32: {
+    1: 25000, 2: 50, 3: 50, 4: 50, 5: 42195, 16: 20000, 7: 35000, 8: 200,
+    9: 30, 10: 2000, 11: 30, 12: 50, 13: 250, 14: 30, 15: 5000, 6: 50000,
+    17: 50, 27: 200, 19: 150000, 20: 200, 21: 20000, 22: 50, 23: 1000,
+    24: 2000, 25: 30000, 26: 300,
+  },
+};
 
 function configBoolean(key: string, fallback: boolean): boolean {
   const value = U.GetConfig(key);
@@ -536,6 +554,15 @@ function cooperationChallengeEnabled(): boolean {
   return configBoolean('cooperation_challenge_enabled', true);
 }
 
+// 'completed' mirrors the archived all-unlock policy used for skin packs and
+// SECRET MUSIC: the group_coope totals are reported at each event's goal so
+// the Group Challenge list shows every challenge cleared, which is the state
+// the already-granted prizes belong to.  'progression' keeps only the real
+// accumulated totals.
+function cooperationCompletionArchived(): boolean {
+  return configString('cooperation_challenge_completion', 'completed') === 'completed';
+}
+
 function cooperationEventIds(gameCode: string): number[] {
   return (COOPERATION_EVENT_IDS[gameCode] || COOPERATION_EVENT_IDS.K33).slice();
 }
@@ -584,6 +611,33 @@ function mergeTrophyList(previous: number[] | undefined, incoming: number[]): nu
     }
   }
   return merged;
+}
+
+// Live Point milestones are recorded by the client in the shared 48-slot item
+// array: crossing milestone m (threshold 2500/3750/5000/7500/8750/11250 and
+// then +15000 per eight entries) writes the self-describing marker
+// item[m - 1] = m alongside the Custom selection slots.  Real captures show
+// uploads such as [1], [1,2], [1,2,3] that grow one credit at a time while a
+// boot replays every reached milestone.  A boot that has not replayed them yet
+// uploads fewer markers, so a plain overwrite would erase stored milestones
+// and resurrect the unlock popup on later card-ins.
+function mergeCustomItems(
+  previous: number[] | undefined,
+  incoming: number[] | undefined
+): number[] {
+  const stored = normalizeCustomItems(previous);
+  const uploaded = incoming && incoming.length > 0
+    ? normalizeCustomItems(incoming)
+    : null;
+  if (!uploaded) return stored;
+  return stored.map((value, index) => {
+    const marker = index + 1;
+    // Never let a stale boot drop an already-recorded milestone marker.
+    if (value === marker || uploaded[index] === marker) {
+      return marker;
+    }
+    return uploaded[index];
+  });
 }
 
 function clampS32(value: any): number {
@@ -801,7 +855,8 @@ function nextGameendSession(current: any): number {
 }
 
 function compactRequestFingerprint(data: any): string {
-  const serialized = JSON.stringify(data);
+  const normalized = stableReplacer(data);
+  const serialized = JSON.stringify(normalized);
   let first = 0x811c9dc5;
   let second = 0x9e3779b9;
   for (let index = 0; index < serialized.length; index++) {
@@ -810,6 +865,40 @@ function compactRequestFingerprint(data: any): string {
     second = Math.imul(second ^ code, 0x85ebca6b) + index | 0;
   }
   return `${serialized.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
+}
+
+function stableReplacer(value: any, depth = 0): any {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== 'object') return value;
+  if (depth > 12) return value;
+
+  if (Array.isArray(value)) {
+    return value.map(item => stableReplacer(item, depth + 1));
+  }
+
+  const filteredEntries = Object.entries(value)
+    .filter(([key]) => {
+      const normalizedKey = String(key).toLowerCase();
+      if (normalizedKey === 'status' || normalizedKey === 'request') return false;
+      if (normalizedKey === 'now_time' || normalizedKey === 'nowtime') return false;
+      if (normalizedKey === 'cardrefid') return false;
+      if (
+        normalizedKey === 'time' ||
+        normalizedKey === 'date' ||
+        normalizedKey.endsWith('_time') ||
+        normalizedKey.endsWith('_date')
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => (left[0] > right[0] ? 1 : left[0] < right[0] ? -1 : 0));
+
+  const normalized: { [key: string]: any } = {};
+  for (const [key, valueToReplace] of filteredEntries) {
+    normalized[key] = stableReplacer(valueToReplace, depth + 1);
+  }
+  return normalized;
 }
 
 function emptySkillTotals(): SkillTotals {
@@ -1816,7 +1905,7 @@ export const facilityGet: EPR = async (_info, _data, send) => {
       name: I('str', 'CORE'),
       type: I('u8', 0),
       countryname: I('str', 'UNKNOWN'),
-      countryjname: I('str', '不明'),
+      countryjname: I('str', '涓嶆槑'),
       regionname: I('str', 'CORE'),
       regionjname: I('str', 'CORE'),
       customercode: I('str', 'AXUSR'),
@@ -2133,6 +2222,9 @@ export const gametopGet: EPR = async (info, data, send) => {
   const playerRequest = $(data).element('player');
   const refid = refidFrom(playerRequest.obj, 'refid');
   const profile = (await findProfile(refid)) || defaultProfile();
+  const collaboState = refid
+    ? await DB.FindOne<CollaboState>({ collection: 'collabo_state', refid })
+    : null;
   const requestElement = playerRequest.element('request');
   const requestedKind = requestElement
     ? requestElement.number('kind', 0)
@@ -2244,9 +2336,9 @@ export const gametopGet: EPR = async (info, data, send) => {
       shopname: I('str', shop ? shop.name : ''),
     },
     jubeat_collabo: {
-      gfdm_j: I('bool', false),
-      j_gfdm: I('bool', false),
-      save_state: I('s32', 0),
+      gfdm_j: I('bool', Boolean(collaboState && collaboState.gfdmRegistered)),
+      j_gfdm: I('bool', Boolean(collaboState && collaboState.jubeatConfirmed)),
+      save_state: I('s32', Number(collaboState ? collaboState.saveState || 0 : 0)),
     },
     syogo_list: A('s16', negatives(200)),
     badge_list: A('s16', negatives(200)),
@@ -2398,9 +2490,7 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
   const customizeElement = playerInfo.element('customize');
   const customize = $(customizeElement ? customizeElement.obj : {});
   const incomingCustomItems = playerInfo.numbers('item', []);
-  const savedCustomItems = incomingCustomItems.length > 0
-    ? normalizeCustomItems(incomingCustomItems)
-    : normalizeCustomItems(existing.customItems);
+  const savedCustomItems = mergeCustomItems(existing.customItems, incomingCustomItems);
   const playstyles = playerInfo.numbers('playstyles', []);
   const infoElement = playerInfo.element('info');
   const info = $(infoElement ? infoElement.obj : {});
@@ -2492,11 +2582,11 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
   // fallback; taking the maximum supports both forms without regression.
   const savedLivePoint = isDuplicate
     ? existing.livePoint
-    : clampS32(Math.max(
-        existing.livePoint,
-        incomingLivePoint,
-        clampS32(existing.livePoint + earnedLivePoint)
-      ));
+    : clampS32(
+        incomingLivePoint >= existing.livePoint
+          ? incomingLivePoint
+          : Math.max(existing.livePoint, existing.livePoint + earnedLivePoint)
+      );
   const incomingTrophyList = playerInfo.numbers('trophy_list', []);
   const savedTrophyList = mergeTrophyList(existing.trophyList, incomingTrophyList);
   const plusLimit = xg2PlusLimit();
@@ -2540,7 +2630,7 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
     group: info.number('group', existing.infoState.group),
     shopChamp: info.number('shopchamp', existing.infoState.shopChamp),
     groupLevel: info.number('group_lv', existing.infoState.groupLevel),
-    livePoint: info.number('live_point', existing.infoState.livePoint),
+    livePoint: savedLivePoint,
     texture: info.number('texture', existing.infoState.texture),
     groupmemberRecruitment: info.number(
       'groupmember_recruitment',
@@ -3119,14 +3209,20 @@ function rootCooperationNodes(group: Group | null, gameCode: string): any[] {
   const saved = (group.cooperationScores || []).filter(value =>
     value.gameCode === gameCode
   );
+  const goals = COOPERATION_GOALS[gameCode] || COOPERATION_GOALS.K33;
+  const completed = cooperationChallengeEnabled() && cooperationCompletionArchived();
   // Once group_coope is present the game no longer falls back to its local
   // table, so return the complete 26-entry catalog in the original XML order.
   return cooperationEventIds(gameCode).map(eventId => {
     const state = saved.find(value => value.eventId === eventId);
+    const goal = goals[eventId] || 0;
+    const totalScore = completed && goal > 0
+      ? Math.max(clampU32(state ? state.totalScore : 0), goal)
+      : clampU32(state ? state.totalScore : 0);
     return K.ATTR(
       { eventid: String(eventId) },
       {
-        total_score: I('u32', state ? clampU32(state.totalScore) : 0),
+        total_score: I('u32', totalScore),
         valid_time: I(
           'str',
           state && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(state.validTime)
@@ -3655,7 +3751,9 @@ export const collaboCheck: EPR = async (_info, data, send) => {
     ? await DB.FindOne<CollaboState>({ collection: 'collabo_state', refid })
     : null;
   await send.object({
+    gfdm_j: I('bool', Boolean(state && state.gfdmRegistered)),
     j_gfdm: I('bool', Boolean(state && state.jubeatConfirmed)),
+    save_state: I('s32', Number(state ? state.saveState || 0 : 0)),
   });
 };
 
@@ -3956,3 +4054,4 @@ export const logUnhandled: EPR = async (info, data, send) => {
   console.log(`[unhandled] ${info.module}.${info.method} ${JSON.stringify(data)}`);
   await send.success();
 };
+

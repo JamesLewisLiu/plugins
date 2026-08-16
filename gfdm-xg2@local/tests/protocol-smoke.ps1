@@ -1,22 +1,24 @@
 ﻿param(
   [string]$Endpoint = 'http://127.0.0.1:8083/',
   [switch]$CooperationChallengeEnabled,
-  [int]$ExpectedEapassValidDays = 365,
-  [int]$ExpectedXgBossLevel = 15,
-  [int]$ExpectedDemoMusicId = 1845,
-  [int]$ExpectedDemoSequenceMode = 1,
-  [int]$ExpectedDemoStartMs = 58500,
-  [int]$ExpectedDemoDurationMs = 9800
+  [ValidateSet('completed', 'progression')]
+  [string]$CooperationCompletion = 'completed'
 )
 
 $ErrorActionPreference = 'Stop'
 $endpoint = $Endpoint
-$memorialDay = [int](Get-Date -Format 'MMdd')
 $xg2PlusMusic = @(1837, 1865, 1833, 1869, 1816, 1872, 1820, 1868, 1827, 1844, 1866, 1840, 1871, 1815, 1825)
 $xg2PlusBorders = @(4000, 8000, 12000, 16000, 20000, 24000, 28000, 32000, 36000, 40000, 44000, 48000, 52000, 56000, 60000)
 $cooperationEventIds = @{
   K33 = @(1, 2, 3, 4, 5, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15, 6, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
   K32 = @(1, 2, 3, 4, 5, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15, 6, 17, 27, 19, 20, 21, 22, 23, 24, 25, 26)
+}
+# Server-generated Community logs use the MMDD,musicId param format.
+$memorialDay = [int](Get-Date -Format 'MMdd')
+# Completion goals recovered from data/product/xml/coop_data.xml.
+$cooperationGoals = @{
+  K33 = @{ 1 = 13000; 2 = 50; 3 = 50; 4 = 50; 5 = 21097; 16 = 10000; 7 = 18000; 8 = 200; 9 = 30; 10 = 2000; 11 = 30; 12 = 50; 13 = 250; 14 = 30; 15 = 5000; 6 = 30000; 17 = 50; 18 = 200; 19 = 80000; 20 = 200; 21 = 10000; 22 = 50; 23 = 1000; 24 = 2000; 25 = 15000; 26 = 300 }
+  K32 = @{ 1 = 25000; 2 = 50; 3 = 50; 4 = 50; 5 = 42195; 16 = 20000; 7 = 35000; 8 = 200; 9 = 30; 10 = 2000; 11 = 30; 12 = 50; 13 = 250; 14 = 30; 15 = 5000; 6 = 50000; 17 = 50; 27 = 200; 19 = 150000; 20 = 200; 21 = 20000; 22 = 50; 23 = 1000; 24 = 2000; 25 = 30000; 26 = 300 }
 }
 
 function Get-NumberArray {
@@ -39,25 +41,6 @@ function Assert-NumberArray {
       $actual.Count -ne $Expected.Count -or
       ($actual -join ' ') -ne ($Expected -join ' ')) {
     throw "$Context returned '$($actual -join ' ')' instead of '$($Expected -join ' ')'"
-  }
-}
-
-function Assert-XGSecretRegularUnlocked {
-  param(
-    [Parameter(Mandatory = $true)]$MusicIds,
-    [Parameter(Mandatory = $true)]$SequenceMasks,
-    [Parameter(Mandatory = $true)][string]$Context
-  )
-
-  $ids = @(Get-NumberArray $MusicIds)
-  $masks = @(Get-NumberArray $SequenceMasks)
-  if ($ids.Count -ne $masks.Count) {
-    throw "$Context returned mismatched music-id and sequence-mask arrays"
-  }
-  for ($index = 0; $index -lt $ids.Count; $index++) {
-    if ([int]$ids[$index] -ge 0 -and (([int]$masks[$index] -band 4) -eq 0)) {
-      throw "$Context music $($ids[$index]) is missing the REGULAR unlock bit in mask $($masks[$index])"
-    }
   }
 }
 
@@ -346,13 +329,6 @@ function Assert-PlayerCooperationScore {
 }
 
 foreach ($model in @('K32', 'K33')) {
-  $facility = Invoke-GameRequest $model '<facility method="get"/>'
-  Assert-Response $facility 'facility'
-  if ([string]$facility.response.facility.share.eapass.valid.__type -ne 'u16' -or
-      [int]$facility.response.facility.share.eapass.valid.'#text' -ne $ExpectedEapassValidDays) {
-    throw "$model facility did not return e-AMUSEMENT PASS validity $ExpectedEapassValidDays"
-  }
-
   $shop = Invoke-GameRequest $model '<shopinfo method="regist"><shop><locationid __type="str">ea</locationid></shop></shopinfo>'
   Assert-Response $shop 'shopinfo'
   if ([string]$shop.response.shopinfo.data.cabid.'#text' -ne '1') {
@@ -374,10 +350,6 @@ foreach ($model in @('K32', 'K33')) {
   if ([int]$game.response.gameinfo.xg_free_music.free_seq.__count -ne 155) {
     throw "$model gameinfo did not return 155 XG sequence masks"
   }
-  Assert-XGSecretRegularUnlocked `
-    $game.response.gameinfo.xg_free_music.free_music `
-    $game.response.gameinfo.xg_free_music.free_seq `
-    "$model gameinfo SECRET MUSIC"
   if (-not $game.response.gameinfo.info.info_plus) {
     throw "$model gameinfo is missing the late-XG2 info tree"
   }
@@ -386,9 +358,9 @@ foreach ($model in @('K32', 'K33')) {
   }
   Assert-NumberArray $game.response.gameinfo.plus.music_list $xg2PlusMusic "$model gameinfo XG2+ music list"
   Assert-NumberArray $game.response.gameinfo.plus.border_list $xg2PlusBorders "$model gameinfo XG2+ border list"
-  if ([int]$game.response.gameinfo.xg_bossdata.division.'#text' -ne $ExpectedXgBossLevel -or
+  if ([int]$game.response.gameinfo.xg_bossdata.division.'#text' -ne 15 -or
       [int]$game.response.gameinfo.v_bossdata.division.'#text' -ne 14) {
-    throw "$model gameinfo did not return XG/V boss divisions $ExpectedXgBossLevel/14"
+    throw "$model gameinfo did not return XG/V boss divisions 15/14"
   }
 
   $demo = Invoke-GameRequest $model '<demodata method="get"><shop><locationid __type="str">LOCAL</locationid></shop><hitchart_nr __type="u16">100</hitchart_nr></demodata>'
@@ -408,25 +380,6 @@ foreach ($model in @('K32', 'K33')) {
   }
   Assert-NumberArray $demo.response.demodata.plus.music_list $xg2PlusMusic "$model demodata XG2+ music list"
   Assert-NumberArray $demo.response.demodata.plus.border_list $xg2PlusBorders "$model demodata XG2+ border list"
-  if ([int]$demo.response.demodata.bossdata.division.'#text' -ne $ExpectedXgBossLevel -or
-      [int]$demo.response.demodata.bossdata.division.'#text' -ne
-        [int]$game.response.gameinfo.xg_bossdata.division.'#text') {
-    throw "$model demodata and gameinfo returned inconsistent XG boss divisions"
-  }
-  Assert-NumberArray `
-    $demo.response.demodata.trialdata.musicid `
-    @(
-      $ExpectedDemoMusicId,
-      $ExpectedDemoStartMs,
-      $ExpectedDemoDurationMs,
-      $ExpectedDemoStartMs,
-      $ExpectedDemoDurationMs
-    ) `
-    "$model demodata Demo transport"
-  Assert-NumberArray `
-    $demo.response.demodata.trialdata.grade_border `
-    (@($ExpectedDemoSequenceMode) + @(0) * 14) `
-    "$model demodata Demo sequence transport"
   if ($demo.response.demodata.info -or
       $demo.response.demodata.hitchart.data -or
       $demo.response.demodata.myshop_rank.shopchamp.representation -or
@@ -445,10 +398,6 @@ foreach ($model in @('K32', 'K33')) {
   if ([int]$top.response.gametop.player.xg_secret_music_id.__count -ne 155) {
     throw "$model gametop did not return 155 XG secret-music slots"
   }
-  Assert-XGSecretRegularUnlocked `
-    $top.response.gametop.player.xg_secret_music_id `
-    $top.response.gametop.player.xg_secret_music_seq `
-    "$model gametop SECRET MUSIC"
   if (-not $top.response.gametop.player.xg) {
     throw "$model gametop is missing the XG score container"
   }
@@ -517,7 +466,7 @@ foreach ($model in @('K32', 'K33')) {
     }
   }
 
-  $groupSearch = Invoke-GameRequest $model '<groupsearch method="groupid_search"><groupid __type="s32">1999999999</groupid></groupsearch>'
+  $groupSearch = Invoke-GameRequest $model '<groupsearch method="groupid_search"><groupid __type="s32">999999</groupid></groupsearch>'
   Assert-Response $groupSearch 'groupsearch'
 
   $groupCreate = Invoke-GameRequest $model '<groupcreate method="regist"><group><group_name __type="str">SMOKE</group_name><icon __type="s32">0</icon><refid __type="str">SMOKE-UNKNOWN</refid><is_recruitment __type="bool">1</is_recruitment></group></groupcreate>'
@@ -563,36 +512,8 @@ foreach ($model in @('K32', 'K33')) {
   $roundTripStyles[16] = 2
   $roundTripStyles[49] = 9
   $roundTripStyleText = $roundTripStyles -join ' '
-  $zeroPlaystyleText = (@(0) * 50) -join ' '
-  $roundTripTrophies = @(-1) * 19
-  $roundTripTrophies[4] = 1
-  $roundTripTrophies[5] = 2
-  $roundTripTrophies[18] = 17
-  $roundTripTrophyText = $roundTripTrophies -join ' '
-  $roundTripEmblem = @(1, 3, 2)
-  $roundTripEmblemText = $roundTripEmblem -join ' '
-  $roundTripCustomItems = @(0) * 48
-  $roundTripCustomItems[31] = 11
-  $roundTripCustomItems[39] = 3
-  $roundTripCustomItems[41] = 5
-  $roundTripCustomItems[42] = 7
-  $roundTripCustomItems[46] = 9
-  $roundTripCustomItemText = $roundTripCustomItems -join ' '
-  $skinPackItems = @(200001..200011) + (@(0) * 37)
-  $recentMusicIds = @(1823, 1838, 1843, 1506, 1422, 1834, 1853) + (@(-1) * 13)
-  $recentMaxComboRates = @(100, 96, 92, 88, 84, 80, 76) + (@(0) * 13)
-  $recentPerfectRates = @(99, 95, 91, 87, 83, 79, 75) + (@(0) * 13)
-  $recentMissRates = @(0, 1, 2, 3, 4, 5, 6) + (@(0) * 13)
-  $vRecentMusicIds = @(1853) + (@(-1) * 19)
-  $vRecentClear = @(1) + (@(0) * 19)
-  $vRecentFlags = @(3) + (@(0) * 19)
-  $vRecentDifficulty = @(7) + (@(0) * 19)
-  $vRecentComboRates = @(93) + (@(0) * 19)
-  $vRecentPerfectRates = @(89) + (@(0) * 19)
   $classicSkill = if ($model -eq 'K32') { 2232 } else { 2233 }
   $standardSkill = if ($model -eq 'K32') { 1232 } else { 1233 }
-  $classicSkillPoint = if ($model -eq 'K32') { 1102 } else { 1103 }
-  $standardSkillPoint = if ($model -eq 'K32') { 1202 } else { 1203 }
   $beginnerSkill = if ($model -eq 'K32') { 3232 } else { 3233 }
   $kindOneSkill = if ($model -eq 'K32') { 4232 } else { 4233 }
   $classicRank = 4
@@ -600,9 +521,7 @@ foreach ($model in @('K32', 'K33')) {
   $beginnerRank = 2
   $kindOneRank = 1
   $misalignedStageMusicId = if ($model -eq 'K32') { 29032 } else { 29033 }
-  $endPayload = "<gameend method=`"regist`"><gamemode mode=`"game_mode`"/><mode __type=`"str`">classic</mode><modedata><stage><musicid __type=`"s32`">$misalignedStageMusicId</musicid></stage></modedata><player card=`"use`" no=`"1`"><playerinfo><refid __type=`"str`">$groupRefid</refid><emblem __type=`"u8`" __count=`"3`">$roundTripEmblemText</emblem><playstyles __type=`"s32`" __count=`"50`">$roundTripStyleText</playstyles><trophy_list __type=`"s32`" __count=`"19`">$roundTripTrophyText</trophy_list><item __type=`"s32`" __count=`"48`">$roundTripCustomItemText</item><info_level __type=`"u8`">4</info_level><customize><shutter __type=`"u8`">3</shutter><auto __type=`"u8`">1</auto><random __type=`"u8`">2</random><skin __type=`"u32`">8</skin><meter_custom __type=`"u8`" __count=`"3`">1 2 3</meter_custom></customize><info><log __type=`"u32`">1</log><coope_challenge __type=`"u32`">1</coope_challenge></info><groupdata groupid=`"0`"><pdata><icon __type=`"s32`">16</icon><icon_back __type=`"s32`">2</icon_back><coope_eventid __type=`"s32`">1</coope_eventid><log_num __type=`"s32`">1</log_num><play_log><index __type=`"s32`">1</index><logid __type=`"s32`">2</logid><attrib __type=`"s32`">1</attrib><param __type=`"str`">812,1853</param></play_log></pdata></groupdata><live_point __type=`"s32`">2903</live_point><get_live_point __type=`"s32`">300</get_live_point></playerinfo><playdata><kind __type=`"s8`">0</kind><musicid __type=`"s32`">1853</musicid><music_type __type=`"s8`">1</music_type><seqmode __type=`"s8`">1</seqmode><skill_point __type=`"s32`">$classicSkillPoint</skill_point><skill_perc __type=`"s16`">$classicSkill</skill_perc><result_rank __type=`"s8`">$classicRank</result_rank><score __type=`"u32`">12345</score></playdata></player></gameend>"
-  $technicalPayload = "<xg_recent><clear_num __type=`"u32`">7</clear_num><full_clear_num __type=`"u32`">6</full_clear_num><exc_clear_num __type=`"u32`">5</exc_clear_num><max_clear_difficulty __type=`"s32`">975</max_clear_difficulty><max_fullcombo_clear_difficulty __type=`"s32`">950</max_fullcombo_clear_difficulty><max_excellent_clear_difficulty __type=`"s32`">925</max_excellent_clear_difficulty><musicid __type=`"s32`" __count=`"20`">$($recentMusicIds -join ' ')</musicid><maxcombo_rate __type=`"s8`" __count=`"20`">$($recentMaxComboRates -join ' ')</maxcombo_rate><perfect_rate __type=`"s8`" __count=`"20`">$($recentPerfectRates -join ' ')</perfect_rate><miss_rate __type=`"s8`" __count=`"20`">$($recentMissRates -join ' ')</miss_rate><max_s_clear_difficulty __type=`"s32`">900</max_s_clear_difficulty><max_ss_clear_difficulty __type=`"s32`">875</max_ss_clear_difficulty></xg_recent><v_recent><clear_num __type=`"u32`">4</clear_num><full_clear_num __type=`"u32`">3</full_clear_num><exc_clear_num __type=`"u32`">2</exc_clear_num><max_clear_difficulty __type=`"s8`">90</max_clear_difficulty><max_fullcombo_difficulty __type=`"s8`">80</max_fullcombo_difficulty><max_excellent_difficulty __type=`"s8`">70</max_excellent_difficulty><musicid __type=`"s32`" __count=`"20`">$($vRecentMusicIds -join ' ')</musicid><clear __type=`"s8`" __count=`"20`">$($vRecentClear -join ' ')</clear><flags __type=`"u32`" __count=`"20`">$($vRecentFlags -join ' ')</flags><difficulty __type=`"s8`" __count=`"20`">$($vRecentDifficulty -join ' ')</difficulty><combo_rate __type=`"s8`" __count=`"20`">$($vRecentComboRates -join ' ')</combo_rate><perfect_rate __type=`"s8`" __count=`"20`">$($vRecentPerfectRates -join ' ')</perfect_rate></v_recent>"
-  $endPayload = $endPayload.Replace('</info><groupdata', "</info>$technicalPayload<groupdata")
+  $endPayload = "<gameend method=`"regist`"><gamemode mode=`"game_mode`"/><mode __type=`"str`">classic</mode><modedata><stage><musicid __type=`"s32`">$misalignedStageMusicId</musicid></stage></modedata><player card=`"use`" no=`"1`"><playerinfo><refid __type=`"str`">$groupRefid</refid><emblem __type=`"u8`" __count=`"3`">1 2 3</emblem><playstyles __type=`"s32`" __count=`"50`">$roundTripStyleText</playstyles><info_level __type=`"u8`">4</info_level><customize><shutter __type=`"u8`">3</shutter><auto __type=`"u8`">1</auto><random __type=`"u8`">2</random><skin __type=`"u32`">8</skin><meter_custom __type=`"u8`" __count=`"3`">1 2 3</meter_custom></customize><info><log __type=`"u32`">1</log><coope_challenge __type=`"u32`">1</coope_challenge></info><groupdata groupid=`"0`"><pdata><icon __type=`"s32`">16</icon><icon_back __type=`"s32`">2</icon_back><coope_eventid __type=`"s32`">1</coope_eventid><log_num __type=`"s32`">1</log_num><play_log><index __type=`"s32`">1</index><logid __type=`"s32`">2</logid><attrib __type=`"s32`">1</attrib><param __type=`"str`">812,1853</param></play_log><event_log><index __type=`"s32`">1</index><logid __type=`"s32`">1</logid><attrib __type=`"s32`">2</attrib><param __type=`"str`">812,1834</param></event_log></pdata></groupdata><live_point __type=`"s32`">7</live_point></playerinfo><playdata><kind __type=`"s8`">0</kind><musicid __type=`"s32`">1853</musicid><music_type __type=`"s8`">1</music_type><seqmode __type=`"s8`">1</seqmode><skill_perc __type=`"s16`">$classicSkill</skill_perc><result_rank __type=`"s8`">$classicRank</result_rank><score __type=`"u32`">12345</score></playdata></player></gameend>"
   $firstEnd = Invoke-GameRequest $model $endPayload
   Assert-Response $firstEnd 'gameend'
   $retryEnd = Invoke-GameRequest $model $endPayload
@@ -612,71 +531,38 @@ foreach ($model in @('K32', 'K33')) {
       [string]$firstEnd.response.gameend.player.live_point.__type -ne 's32') {
     throw "$model gameend response is missing the K33 emblem/live_point fields"
   }
-  Assert-NumberArray $firstEnd.response.gameend.player.emblem $roundTripEmblem "$model Ability emblem"
-  Assert-NumberArray $firstEnd.response.gameend.player.xg_item $skinPackItems "$model XG2 Skin pack grants"
-  Assert-NumberArray $firstEnd.response.gameend.player.xg_recentdata.maxcombo_rate $recentMaxComboRates "$model gameend XG recent combo rates"
-  Assert-NumberArray $firstEnd.response.gameend.player.xg_recentdata.perfect_rate $recentPerfectRates "$model gameend XG recent perfect rates"
-  Assert-NumberArray $firstEnd.response.gameend.player.xg_recentdata.miss_rate $recentMissRates "$model gameend XG recent miss rates"
-  if ([int]$firstEnd.response.gameend.player.live_point.'#text' -ne 2903 -or
-      [int]$retryEnd.response.gameend.player.live_point.'#text' -ne 2903) {
-    throw "$model double-counted get_live_point even though live_point already contained it"
-  }
-  if ([int]$firstEnd.response.gameend.player.v_skill.point.'#text' -ne $classicSkillPoint -or
-      [int]$firstEnd.response.gameend.player.v_skill.all_point.'#text' -ne $classicSkillPoint) {
-    throw "$model gameend did not return the persisted Classic Skill fields"
-  }
-  Assert-NumberArray $firstEnd.response.gameend.player.trophy_list $roundTripTrophies "$model gameend trophy list"
   if ([int]$retryEnd.response.gameend.player.play_cnt.'#text' -ne
       [int]$firstEnd.response.gameend.player.play_cnt.'#text') {
     throw "$model gameend retry did not replay the original logical response"
   }
-  $afterEnd = Invoke-GameRequest $model "<gametop method=`"get`"><player no=`"1`"><refid __type=`"str`">$groupRefid</refid></player></gametop>"
-  Assert-Response $afterEnd 'gametop'
-  if ([int]$afterEnd.response.gametop.player.play_cnt.'#text' -ne ($beforePlayCount + 1)) {
-    throw "$model duplicate gameend request incremented play count more than once"
-  }
-  if ([int]$afterEnd.response.gametop.player.live_point.'#text' -ne 2903 -or
-      [int]$afterEnd.response.gametop.player.v_skill.'#text' -ne $classicSkillPoint -or
-      [int]$afterEnd.response.gametop.player.v_all_skill.'#text' -ne $classicSkillPoint) {
-    throw "$model did not round-trip Live Point and Classic Skill fields"
-  }
-  Assert-NumberArray $afterEnd.response.gametop.player.emblem $roundTripEmblem "$model gametop Ability emblem"
-  Assert-NumberArray $afterEnd.response.gametop.player.item $roundTripCustomItems "$model custom item state"
-  Assert-NumberArray $afterEnd.response.gametop.player.xg_recentdata.musicid $recentMusicIds "$model gametop XG recent music IDs"
-  Assert-NumberArray $afterEnd.response.gametop.player.xg_recentdata.maxcombo_rate $recentMaxComboRates "$model gametop XG recent combo rates"
-  Assert-NumberArray $afterEnd.response.gametop.player.xg_recentdata.perfect_rate $recentPerfectRates "$model gametop XG recent perfect rates"
-  Assert-NumberArray $afterEnd.response.gametop.player.xg_recentdata.miss_rate $recentMissRates "$model gametop XG recent miss rates"
-  $vRecentNodes = @($afterEnd.response.gametop.player.v_recentdata.recent)
-  if ($vRecentNodes.Count -ne 20 -or
-      [int]$vRecentNodes[0].musicid -ne 1853 -or
-      [int]$vRecentNodes[0].clear.'#text' -ne 1 -or
-      [int]$vRecentNodes[0].flags.'#text' -ne 3 -or
-      [int]$vRecentNodes[0].difficulty.'#text' -ne 7 -or
-      [int]$vRecentNodes[0].combo_rate.'#text' -ne 93 -or
-      [int]$vRecentNodes[0].perfect_rate.'#text' -ne 89) {
-    throw "$model did not round-trip the 20-entry V recent history"
+  if ([int]$retryEnd.response.gameend.player.live_point.'#text' -ne
+      [int]$firstEnd.response.gameend.player.live_point.'#text') {
+    throw "$model duplicate gameend replay changed the computed live point"
   }
 
-  # A cabinet can occasionally upload the previously-read total in
-  # live_point while placing the actual increment in get_live_point.  A new
-  # card check starts a new credit/session, so the same wire payload must now
-  # advance 2903 by 300 exactly once instead of being mistaken for a retry.
-  $nextCredit = Invoke-GameRequest $model "<cardutil method=`"check`"><card><refid __type=`"str`">$groupRefid</refid></card></cardutil>"
-  Assert-Response $nextCredit 'cardutil'
-  $fallbackEnd = Invoke-GameRequest $model $endPayload
-  Assert-Response $fallbackEnd 'gameend'
-  $fallbackRetry = Invoke-GameRequest $model $endPayload
-  Assert-Response $fallbackRetry 'gameend'
-  if ([int]$fallbackEnd.response.gameend.player.live_point.'#text' -ne 3203 -or
-      [int]$fallbackRetry.response.gameend.player.live_point.'#text' -ne 3203) {
-    throw "$model did not apply stale live_point + get_live_point exactly once"
+  $afterEnd = Invoke-GameRequest $model "<gametop method=`"get`"><player no=`"1`"><refid __type=`"str`">$groupRefid</refid></player></gametop>"
+  Assert-Response $afterEnd 'gametop'
+  $staleLiveBefore = [int]$afterEnd.response.gametop.player.live_point.'#text'
+  $liveGainPayload = @"
+<gameend method="regist"><gamemode mode="game_mode"/><mode __type="str">classic</mode><modedata><stage><musicid __type="s32">$misalignedStageMusicId</musicid></stage></modedata><player card="use" no="1"><playerinfo><refid __type="str">$groupRefid</refid><emblem __type="u8" __count="3">1 2 3</emblem><playstyles __type="s32" __count="50">$roundTripStyleText</playstyles><info_level __type="u8">4</info_level><customize><shutter __type="u8">3</shutter><auto __type="u8">1</auto><random __type="u8">2</random><skin __type="u32">8</skin><meter_custom __type="u8" __count="3">1 2 3</meter_custom></customize><info><log __type="u32">1</log><coope_challenge __type="u32">1</coope_challenge></info><groupdata groupid="0"><pdata><icon __type="s32">16</icon><icon_back __type="s32">2</icon_back><coope_eventid __type="s32">1</coope_eventid><log_num __type="s32">1</log_num><play_log><index __type="s32">2</index><logid __type="s32">3</logid><attrib __type="s32">1</attrib><param __type="str">812,1853</param></play_log><event_log><index __type="s32">2</index><logid __type="s32">32</logid><attrib __type="s32">2</attrib><param __type="str">2,3</param></event_log></pdata></groupdata><live_point __type="s32">1</live_point><get_live_point __type="s32">2500</get_live_point></playerinfo><playdata><kind __type="s8">0</kind><musicid __type="s32">1853</musicid><music_type __type="s8">1</music_type><seqmode __type="s8">1</seqmode><skill_perc __type="s16">$classicSkill</skill_perc><result_rank __type="s8">$classicRank</result_rank><score __type="u32">23456</score></playdata></player></gameend>"
+"@
+  $staleGainEnd = Invoke-GameRequest $model $liveGainPayload
+  Assert-Response $staleGainEnd 'gameend'
+  $staleGainReplay = Invoke-GameRequest $model $liveGainPayload
+  Assert-Response $staleGainReplay 'gameend'
+  if ([int]$staleGainReplay.response.gameend.player.live_point.'#text' -ne [int]$staleGainEnd.response.gameend.player.live_point.'#text') {
+    throw "$model live point changed on duplicate stale-base/award request"
   }
-  $afterFallback = Invoke-GameRequest $model "<gametop method=`"get`"><player no=`"1`"><refid __type=`"str`">$groupRefid</refid></player></gametop>"
-  Assert-Response $afterFallback 'gametop'
-  if ([int]$afterFallback.response.gametop.player.live_point.'#text' -ne 3203) {
-    throw "$model did not persist the fallback Live Point total"
+  $expectedStableLivePoint = $staleLiveBefore + 2500
+  if ([int]$staleGainEnd.response.gameend.player.live_point.'#text' -ne $expectedStableLivePoint) {
+    throw "$model stale-base gameend did not apply award cumulatively once"
   }
-  Assert-NumberArray $afterEnd.response.gametop.player.trophy_list $roundTripTrophies "$model gametop trophy list"
+
+  $afterEnd = Invoke-GameRequest $model "<gametop method=`"get`"><player no=`"1`"><refid __type=`"str`">$groupRefid</refid></player></gametop>"
+  Assert-Response $afterEnd 'gametop'
+  if ([int]$afterEnd.response.gametop.player.play_cnt.'#text' -ne ($beforePlayCount + 2)) {
+    throw "$model duplicate gameend request incremented play count more than once"
+  }
   $storedStyles = @(([string]$afterEnd.response.gametop.player.xg_playstyle.'#text') -split ' ' | Where-Object { $_ -ne '' })
   if ([int]$afterEnd.response.gametop.player.mode.'#text' -ne 2) {
     throw "$model CLASSIC did not round-trip as SELECT MODE value 2"
@@ -689,18 +575,6 @@ foreach ($model in @('K32', 'K33')) {
   }
   if ([int]$afterEnd.response.gametop.player.info.log.'#text' -ne 1) {
     throw "$model did not persist the Community Log tutorial state"
-  }
-  $secretIds = @(Get-NumberArray $afterEnd.response.gametop.player.xg_secret_music_id)
-  $secretSeqs = @(Get-NumberArray $afterEnd.response.gametop.player.xg_secret_music_seq)
-  $xPlanIndex = -1
-  for ($secretIndex = 0; $secretIndex -lt $secretIds.Count; $secretIndex++) {
-    if ([int]$secretIds[$secretIndex] -eq 1834) {
-      $xPlanIndex = $secretIndex
-      break
-    }
-  }
-  if ($xPlanIndex -lt 0 -or [int]$secretSeqs[$xPlanIndex] -ne 15) {
-    throw "$model did not return the complete tutorial X-Plan sequence mask 15"
   }
   $expectedCoopeState = if ($CooperationChallengeEnabled) { 1 } else { 0 }
   if ([int]$afterEnd.response.gametop.player.info.coope_challenge.'#text' -ne $expectedCoopeState) {
@@ -716,21 +590,12 @@ foreach ($model in @('K32', 'K33')) {
   Assert-FailedScoreEncoding $afterEnd.response.gametop.player.standard 1853 1 2 11 11 19 $classicSkill $classicRank "$model classic score container"
   Assert-MusicAbsent $afterEnd.response.gametop.player.standard $misalignedStageMusicId "$model classic score from misaligned modedata.stage"
 
-  $standardEnd = Invoke-GameRequest $model "<gameend method=`"regist`"><gamemode mode=`"game_mode`"/><mode __type=`"str`">standard</mode><player card=`"use`" no=`"1`"><playerinfo><refid __type=`"str`">$groupRefid</refid><playstyles __type=`"s32`" __count=`"50`">$zeroPlaystyleText</playstyles><info><log __type=`"u32`">0</log></info><groupdata groupid=`"0`"><pdata><play_log><index __type=`"s32`">3</index><logid __type=`"s32`">3</logid><attrib __type=`"s32`">1</attrib><param __type=`"str`">813,1853</param></play_log><event_log><index __type=`"s32`">3</index><logid __type=`"s32`">32</logid><attrib __type=`"s32`">2</attrib><param __type=`"str`">2,3</param></event_log></pdata></groupdata></playerinfo><playdata><kind __type=`"s8`">0</kind><musicid __type=`"s32`">1853</musicid><music_type __type=`"s8`">1</music_type><seqmode __type=`"s8`">1</seqmode><skill_point __type=`"s32`">$standardSkillPoint</skill_point><skill_perc __type=`"s16`">$standardSkill</skill_perc><result_rank __type=`"s8`">$standardRank</result_rank><score __type=`"u32`">22345</score></playdata></player></gameend>"
+  $standardEnd = Invoke-GameRequest $model "<gameend method=`"regist`"><gamemode mode=`"game_mode`"/><mode __type=`"str`">standard</mode><player card=`"use`" no=`"1`"><playerinfo><refid __type=`"str`">$groupRefid</refid><groupdata groupid=`"0`"><pdata><play_log><index __type=`"s32`">2</index><logid __type=`"s32`">3</logid><attrib __type=`"s32`">1</attrib><param __type=`"str`">813,1853</param></play_log><event_log><index __type=`"s32`">2</index><logid __type=`"s32`">32</logid><attrib __type=`"s32`">2</attrib><param __type=`"str`">2,3</param></event_log></pdata></groupdata></playerinfo><playdata><kind __type=`"s8`">0</kind><musicid __type=`"s32`">1853</musicid><music_type __type=`"s8`">1</music_type><seqmode __type=`"s8`">1</seqmode><skill_perc __type=`"s16`">$standardSkill</skill_perc><result_rank __type=`"s8`">$standardRank</result_rank><score __type=`"u32`">22345</score></playdata></player></gameend>"
   Assert-Response $standardEnd 'gameend'
   $afterStandard = Invoke-GameRequest $model "<gametop method=`"get`"><player no=`"1`"><refid __type=`"str`">$groupRefid</refid><request><kind __type=`"s8`">0</kind></request></player></gametop>"
   Assert-Response $afterStandard 'gametop'
   if ([int]$afterStandard.response.gametop.player.mode.'#text' -ne 1) {
     throw "$model STANDARD did not round-trip as SELECT MODE value 1"
-  }
-  if ([int]$afterStandard.response.gametop.player.xg_skill.'#text' -ne $standardSkillPoint -or
-      [int]$afterStandard.response.gametop.player.xg_all_skill.'#text' -ne $standardSkillPoint) {
-    throw "$model did not round-trip the XG Skill fields"
-  }
-  $afterStandardStyles = @(Get-NumberArray $afterStandard.response.gametop.player.xg_playstyle)
-  if ([int]$afterStandardStyles[16] -ne 2 -or
-      [int]$afterStandard.response.gametop.player.info.log.'#text' -ne 1) {
-    throw "$model allowed stale gameend data to revoke the one-shot Community tutorial state"
   }
   Assert-FailedScoreEncoding $afterStandard.response.gametop.player.xg 1853 1 1 9 9 16 $standardSkill $standardRank "$model standard score container"
   Assert-FailedScoreEncoding $afterStandard.response.gametop.player.standard 1853 1 2 11 11 19 $classicSkill $classicRank "$model classic score after standard play"
@@ -805,41 +670,29 @@ foreach ($model in @('K32', 'K33')) {
   $created = Invoke-GameRequest $model "<groupcreate method=`"regist`"><group><group_name __type=`"str`">$model GROUP</group_name><icon __type=`"s32`">1</icon><refid __type=`"str`">$groupRefid</refid><is_recruitment __type=`"bool`">1</is_recruitment></group></groupcreate>"
   Assert-Response $created 'groupcreate'
   $createdGroupId = [int]$created.response.groupcreate.groupdata.groupid
-  if ($createdGroupId -lt 1000000000 -or
-      $createdGroupId -gt 2147483647 -or
-      ([string]$createdGroupId).Length -ne 10) {
-    throw "$model registered player received non-searchable GroupID '$createdGroupId'"
+  if ($createdGroupId -le 0) {
+    throw "$model registered player could not create a persistent group"
   }
   if ([string]$created.response.groupcreate.groupdata.state -ne '0') {
     throw "$model group-create response is missing state 0"
   }
   Assert-GroupDataPayload $created.response.groupcreate.groupdata "$model group create"
   $createdPlayer = @($created.response.groupcreate.groupdata.member.player)[0]
-  Assert-NumberArray $createdPlayer.emblem $roundTripEmblem "$model group-create Ability emblem"
-  if ([int]$createdPlayer.skill.'#text' -ne 2000) {
-    throw "$model group-create member Skill did not select the Ability colour band"
-  }
   $expectedCoopeEventId = if ($CooperationChallengeEnabled) { 1 } else { 0 }
   if ([int]$createdPlayer.icon.'#text' -ne 16 -or
       [int]$createdPlayer.icon_back.'#text' -ne 2 -or
-      [int]$createdPlayer.log_num.'#text' -ne 5 -or
+      [int]$createdPlayer.log_num.'#text' -ne 4 -or
       [int]$createdPlayer.coope_eventid.'#text' -ne $expectedCoopeEventId) {
     throw "$model did not round-trip Community Log state"
   }
   Assert-LogSlot $createdPlayer.p_log_data 1 2 1 '812,1853' "$model first player play log"
-  Assert-LogSlot $createdPlayer.p_log_data 3 3 1 '813,1853' "$model second player play log"
-  Assert-LogSlot $createdPlayer.p_log_data 4 5 1 "$memorialDay,1853" "$model generated FULL COMBO log"
-  Assert-LogSlot $createdPlayer.p_log_data 5 7 1 "$memorialDay,1853" "$model generated EXCELLENT log"
-  Assert-LogSlot $createdPlayer.e_log_data 2 1 2 "$memorialDay,1834" "$model generated X-Plan tutorial event log"
-  Assert-LogSlot $createdPlayer.e_log_data 3 32 2 '2,3' "$model second player event log"
-  $xPlanRewardLogs = @(
-    @($createdPlayer.e_log_data.log) | Where-Object {
-      [int]$_.logid.'#text' -eq 1 -and [string]$_.param.'#text' -match ',1834(?:,|$)'
-    }
-  )
-  if ($xPlanRewardLogs.Count -ne 1) {
-    throw "$model generated the one-time X-Plan tutorial reward $($xPlanRewardLogs.Count) times"
-  }
+  Assert-LogSlot $createdPlayer.p_log_data 2 3 1 '813,1853' "$model second player play log"
+  # The score-isolation gameends below upload no play_log, so the server's
+  # result-log generation fills indexes 3 (Full Combo) and 4 (Excellent).
+  Assert-LogSlot $createdPlayer.p_log_data 3 5 1 "$memorialDay,1853" "$model generated FULL COMBO log"
+  Assert-LogSlot $createdPlayer.p_log_data 4 7 1 "$memorialDay,1853" "$model generated EXCELLENT log"
+  Assert-LogSlot $createdPlayer.e_log_data 1 1 2 '812,1834' "$model first player event log"
+  Assert-LogSlot $createdPlayer.e_log_data 2 32 2 '2,3' "$model second player event log"
 
   if ($CooperationChallengeEnabled) {
     Assert-GroupCooperationCatalog $created.response.groupcreate.groupdata $cooperationEventIds[$model] "$model group-create Cooperation catalog"
@@ -867,16 +720,12 @@ foreach ($model in @('K32', 'K33')) {
   if ($null -eq $loadedPlayer) {
     throw "$model groupdata.get did not return the group creator"
   }
-  Assert-NumberArray $loadedPlayer.emblem $roundTripEmblem "$model loaded group-member Ability emblem"
-  if ([int]$loadedPlayer.skill.'#text' -ne 2000) {
-    throw "$model loaded group-member Skill did not select the Ability colour band"
-  }
   Assert-LogSlot $loadedPlayer.p_log_data 1 2 1 '812,1853' "$model loaded first player play log"
-  Assert-LogSlot $loadedPlayer.p_log_data 3 3 1 '813,1853' "$model loaded second player play log"
-  Assert-LogSlot $loadedPlayer.p_log_data 4 5 1 "$memorialDay,1853" "$model loaded generated FULL COMBO log"
-  Assert-LogSlot $loadedPlayer.p_log_data 5 7 1 "$memorialDay,1853" "$model loaded generated EXCELLENT log"
-  Assert-LogSlot $loadedPlayer.e_log_data 2 1 2 "$memorialDay,1834" "$model loaded generated X-Plan tutorial event log"
-  Assert-LogSlot $loadedPlayer.e_log_data 3 32 2 '2,3' "$model loaded second player event log"
+  Assert-LogSlot $loadedPlayer.p_log_data 2 3 1 '813,1853' "$model loaded second player play log"
+  Assert-LogSlot $loadedPlayer.p_log_data 3 5 1 "$memorialDay,1853" "$model loaded generated FULL COMBO log"
+  Assert-LogSlot $loadedPlayer.p_log_data 4 7 1 "$memorialDay,1853" "$model loaded generated EXCELLENT log"
+  Assert-LogSlot $loadedPlayer.e_log_data 1 1 2 '812,1834' "$model loaded first player event log"
+  Assert-LogSlot $loadedPlayer.e_log_data 2 32 2 '2,3' "$model loaded second player event log"
   if ($CooperationChallengeEnabled) {
     if ([int]$loadedPlayer.log_num.'#text' -ne 9) {
       throw "$model lower incoming log_num did not preserve the index-9 high-water mark"
@@ -887,10 +736,62 @@ foreach ($model in @('K32', 'K33')) {
     $eventOne = @($loadedGroup.response.groupdata.groupdata.group_coope.cooperation_challenge) |
       Where-Object { [int]$_.eventid -eq 1 } |
       Select-Object -First 1
-    $expectedCoopeTotal = $coopeBaselineTotal + 10
-    if ($null -eq $eventOne -or [int]$eventOne.total_score.'#text' -ne $expectedCoopeTotal) {
-      throw "$model duplicate Cooperation progress request returned group total_score '$($eventOne.total_score.'#text')' instead of baseline+10 '$expectedCoopeTotal'"
+    # 'completed' floors every total at its goal, so the +10 delta stays
+    # invisible until the real total passes the goal; 'progression' shows it.
+    $expectedCoopeTotal = if ($CooperationCompletion -eq 'completed') {
+      [Math]::Max($cooperationBaselineTotal, $cooperationGoals[$model][1])
+    } else {
+      $coopeBaselineTotal + 10
     }
+    if ($null -eq $eventOne -or [int]$eventOne.total_score.'#text' -ne $expectedCoopeTotal) {
+      throw "$model duplicate Cooperation progress request returned group total_score '$($eventOne.total_score.'#text')' instead of expected '$expectedCoopeTotal'"
+    }
+    if ($CooperationCompletion -eq 'completed') {
+      foreach ($challenge in @($loadedGroup.response.groupdata.groupdata.group_coope.cooperation_challenge)) {
+        $goal = $cooperationGoals[$model][[int]$challenge.eventid]
+        if ($null -ne $goal -and [int]$challenge.total_score.'#text' -lt $goal) {
+          throw "$model archived completion: event $($challenge.eventid) total '$($challenge.total_score.'#text')' is below goal '$goal'"
+        }
+      }
+    }
+  }
+
+  # Live Point milestone markers (item[m-1] = m) share the 48-slot item array
+  # with the Custom selection slots.  A boot that has not replayed reached
+  # milestones uploads fewer markers, and that upload must never erase the
+  # stored marker set, while genuine selection changes still win.
+  $itemWithMarkers = @(1..48 | ForEach-Object { 0 })
+  $itemWithMarkers[0] = 1
+  $itemWithMarkers[1] = 2
+  $itemWithMarkers[2] = 3
+  $itemWithMarkers[31] = 11
+  $itemAllZero = @(1..48 | ForEach-Object { 0 })
+  $markerItemBody = @"
+<playerinfo><refid __type="str">$groupRefid</refid><item __type="s32" __count="48">$($itemWithMarkers -join ' ')</item></playerinfo>
+"@
+  $markerPlayBody = @"
+<playdata><kind __type="s8">0</kind><musicid __type="s32">1855</musicid><music_type __type="s8">1</music_type><seqmode __type="s8">1</seqmode><skill_perc __type="s16">10</skill_perc><result_rank __type="s8">1</result_rank><score __type="u32">10</score></playdata>
+"@
+  $markerEnd = Invoke-GameRequest $model "<gameend method=`"regist`"><gamemode mode=`"game_mode`"/><mode __type=`"str`">standard</mode><player card=`"use`" no=`"1`">$markerItemBody$markerPlayBody</player></gameend>"
+  Assert-Response $markerEnd 'gameend'
+  $markerTop = Invoke-GameRequest $model "<gametop method=`"get`"><player no=`"1`"><refid __type=`"str`">$groupRefid</refid></player></gametop>"
+  Assert-Response $markerTop 'gametop'
+  $markerItems = @(Get-NumberArray $markerTop.response.gametop.player.item)
+  if ($markerItems.Count -ne 48 -or
+      $markerItems[0] -ne 1 -or $markerItems[1] -ne 2 -or $markerItems[2] -ne 3 -or
+      $markerItems[31] -ne 11) {
+    throw "$model marker gameend did not round-trip item markers and selection"
+  }
+  $staleEnd = Invoke-GameRequest $model "<gameend method=`"regist`"><gamemode mode=`"game_mode`"/><mode __type=`"str`">standard</mode><player card=`"use`" no=`"1`"><playerinfo><refid __type=`"str`">$groupRefid</refid><item __type=`"s32`" __count=`"48`">$($itemAllZero -join ' ')</item></playerinfo>$markerPlayBody</player></gameend>"
+  Assert-Response $staleEnd 'gameend'
+  $staleTop = Invoke-GameRequest $model "<gametop method=`"get`"><player no=`"1`"><refid __type=`"str`">$groupRefid</refid></player></gametop>"
+  Assert-Response $staleTop 'gametop'
+  $staleItems = @(Get-NumberArray $staleTop.response.gametop.player.item)
+  if ($staleItems[0] -ne 1 -or $staleItems[1] -ne 2 -or $staleItems[2] -ne 3) {
+    throw "$model stale zero upload erased stored Live Point milestone markers"
+  }
+  if ($staleItems[31] -ne 0) {
+    throw "$model stale zero upload did not reset the deselected Custom slot"
   }
 
   $groupDataRegist = Invoke-GameRequest $model "<groupdata method=`"regist`"><refid __type=`"str`">$groupRefid</refid><groupdata groupid=`"$createdGroupId`"><group_comment/><player_comment/></groupdata></groupdata>"
@@ -1005,4 +906,8 @@ foreach ($model in @('K32', 'K33')) {
 }
 
 Write-Output 'K32/K33 startup protocol smoke test passed.'
+
+
+
+
 

@@ -114,13 +114,31 @@ award or play count again.
 The Custom screen does not derive its Skin choices from the legacy
 `shutter_list`, `judge_logo_list`, `skin_list` or `attack_effect_list` fields.
 `gametop.player.item:s32[48]` is the current Custom state and is returned by the
-cabinet as `gameend.player.playerinfo.item`; the plugin now persists that array
+cabinet as `gameend.player.playerinfo.item`; the plugin persists that array
 without collapsing it into the older split fields. The recovered client treats
 category-2 item IDs `200001..200011` as 11 Skin packs. They are returned in the
 fixed 48-slot `gameend.player.xg_item` grant array, which populates the Attack
 Effect, Judge Text, Combo, Notes, Shutter and Preset option lists. The verified
 selection indexes are Shutter 31, Attack Effect 39, Judge Text 41, Combo 42 and
 Notes 46; Shutter additionally retains the native BLACK value 98.
+
+The same 48-slot item array also carries the Live Point milestone markers.
+`game.dll sub_1007A400` pops one reached-but-unrecorded milestone per result
+screen (thresholds 2500/3750/5000/7500/8750/11250 and then +15000 per eight
+entries) and records it as the self-describing marker `item[m - 1] = m`, which
+is what real captures show growing `[1] -> [1,2] -> [1,2,3]` one credit at a
+time. A boot that has not replayed its milestones yet uploads fewer markers,
+so the plugin merges uploads per slot and never lets a stale boot drop an
+already-recorded marker; Custom selection slots keep following the upload.
+
+Group Challenge completion display: `coop_data.xml` gives every event a goal,
+and the client compares the `group_coope` total against it. Because every
+challenge prize is already granted through the archived policy (skin packs
+`200001..200011` plus the fully unlocked SECRET MUSIC catalog),
+`cooperation_challenge_completion=completed` reports each total at its goal so
+the challenge list shows the cleared state those prizes belong to, while the
+member contribution scores and the persisted group totals stay real. Switching
+the setting to `progression` returns to the raw accumulated totals.
 
 Historical campaign data and thresholds were reconstructed from the archived
 GuitarFreaks XG2 / DrumMania XG2 guide and then checked against the recovered
