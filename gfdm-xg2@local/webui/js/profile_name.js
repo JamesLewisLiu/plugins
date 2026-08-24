@@ -60,7 +60,7 @@
 
   function musicTitle(value) {
     var title = String(value || '').trim();
-    return title || '（未知曲目）';
+    return title || '(Unknown Song)';
   }
 
   function customSlotText(slot) {
@@ -136,7 +136,7 @@
         customSlotText(custom.notes),
       ]);
     });
-    if (!games.length) addEmptyRow(body, 9, '没有保存设置。');
+    if (!games.length) addEmptyRow(body, 9, 'No saved settings.');
   }
 
   function renderGroup() {
@@ -144,15 +144,15 @@
     var fieldset = element('xg2-group-fields');
     var help = element('xg2-group-help');
     if (!group) {
-      setText('xg2-group-summary', '此资料尚未加入 Group。');
+      setText('xg2-group-summary', 'This profile has not joined a Group.');
       if (fieldset) fieldset.disabled = true;
-      setText(help, '加入 Group 后才能调整图标。');
+      setText(help, 'Join a Group before changing its icon.');
       return;
     }
 
     setText(
       'xg2-group-summary',
-      group.name + ' / ID ' + group.groupId + ' / ' + group.memberCount + ' 人'
+      group.name + ' / ID ' + group.groupId + ' / ' + group.memberCount + ' members'
     );
     var icon = element('xg2-group-icon');
     if (icon) icon.value = String(group.icon);
@@ -160,8 +160,8 @@
     setText(
       help,
       group.isOwner
-        ? '原生图标编号范围为 0～9，下一次 Group 读取时生效。'
-        : '当前资料不是组长，只能查看图标。'
+        ? 'Native icon numbers range from 0 to 9. Changes take effect the next time the Group is loaded.'
+        : 'This profile is not the Group owner and can only view the icon.'
     );
   }
 
@@ -191,8 +191,8 @@
         integerText(record.attempts),
       ]);
     });
-    if (!filtered.length) addEmptyRow(body, 10, '该机种与模式暂无 schema-2 成绩。');
-    setText('xg2-record-count', filtered.length + ' 项');
+    if (!filtered.length) addEmptyRow(body, 10, 'No schema-2 records are available for this game and mode.');
+    setText('xg2-record-count', filtered.length + ' records');
   }
 
   function skillForSelection() {
@@ -254,7 +254,7 @@
       setText('xg2-skill-old', '—');
       setText('xg2-skill-long', '—');
       setText('xg2-skill-all', '—');
-      addEmptyRow(body, 6, '该机种与模式暂无 Skill 数据。');
+      addEmptyRow(body, 6, 'No Skill data is available for this game and mode.');
       return;
     }
 
@@ -271,10 +271,10 @@
         musicTitle(song.titleName),
         chartLabel(selected.gameCode, selected.playMode, song.seqMode),
         hundredths(song.point),
-        song.selected ? '是' : '否',
+        song.selected ? 'Yes' : 'No',
       ]);
     });
-    if (!songs.length) addEmptyRow(body, 6, '这一组暂无 Skill 对象。');
+    if (!songs.length) addEmptyRow(body, 6, 'No Skill entries are available in this bucket.');
   }
 
   function chooseInitialFilters() {
@@ -338,23 +338,23 @@
       if (data.message) return String(data.message);
       if (data.error) return String(data.error);
     }
-    return error && error.message ? String(error.message) : '未知错误';
+    return error && error.message ? String(error.message) : 'Unknown error';
   }
 
   function loadProfileData(successMessage) {
     if (typeof emit !== 'function') {
-      setStatus('当前 WebUI 没有提供 emit()，无法读取扩展数据。', 'danger');
+      setStatus('This WebUI does not provide emit(), so extended data cannot be loaded.', 'danger');
       return Promise.reject(new Error('emit() is unavailable'));
     }
     return emit('xg2-profile-data', { refid: refid }).then(function (response) {
       var data = response && response.data;
       if (!data || data.schemaVersion !== 2) {
-        throw new Error('后台返回了无法识别的数据格式。');
+        throw new Error('The server returned an unrecognized data format.');
       }
       profileData = data;
       renderAll();
       setStatus(
-        successMessage || ('已读取 ' + data.records.length + ' 项合并成绩；查看操作不会写入存档。'),
+        successMessage || (data.records.length + ' merged records loaded. Viewing records does not modify saved data.'),
         successMessage ? 'success' : 'info'
       );
       return data;
@@ -377,17 +377,17 @@
       event.preventDefault();
       var button = form.querySelector('button[type="submit"]');
       if (button) button.disabled = true;
-      setStatus('正在保存……', 'info');
+      setStatus('Saving…', 'info');
       emit(eventName, formDataObject(form))
         .then(function () {
           return loadProfileData(successMessage).catch(function (error) {
             setStatus(
-              successMessage + '，但刷新失败：' + errorMessage(error),
+              successMessage + ', but refresh failed: ' + errorMessage(error),
               'warning'
             );
           });
         }, function (error) {
-          setStatus('保存失败：' + errorMessage(error), 'danger');
+          setStatus('Save failed: ' + errorMessage(error), 'danger');
         })
         .then(function () {
           if (button) button.disabled = false;
@@ -404,19 +404,19 @@
     if (node) node.addEventListener('change', renderSkill);
   });
 
-  bindWriteForm('xg2-name-form', 'xg2-change-name', '玩家名字已保存。');
+  bindWriteForm('xg2-name-form', 'xg2-change-name', 'Player name saved.');
   bindWriteForm(
     'xg2-settings-form',
     'xg2-change-game-settings',
-    '游戏设置已保存。'
+    'Game settings saved.'
   );
   bindWriteForm(
     'xg2-group-form',
     'xg2-change-group-icon',
-    'Group 图标已保存。'
+    'Group icon saved.'
   );
 
   loadProfileData().catch(function (error) {
-    setStatus('读取失败：' + errorMessage(error), 'danger');
+    setStatus('Load failed: ' + errorMessage(error), 'danger');
   });
 })();
