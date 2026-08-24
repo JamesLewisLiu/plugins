@@ -1,4 +1,4 @@
-type Profile = {
+﻿type Profile = {
   collection: 'profile';
   did?: number;
   groupId?: number;
@@ -8,6 +8,9 @@ type Profile = {
   chara: number;
   lastMode: number;
   modeEncodingVersion: number;
+  // The fields below this marker used to be shared between the K32 and K33
+  // profiles of one card.  They are kept only as the migration source; all
+  // reads and writes go through the per-game state in `games`.
   style: number;
   style2: number;
   xgPlaystyle: number[];
@@ -35,6 +38,12 @@ type Profile = {
   playCount: number;
   livePoint: number;
   plusLivePoint: number;
+  trophyList: number[];
+  skillData: { [key: string]: SkillTotals };
+  technicalStatus: { [gameCode: string]: TechnicalStatus };
+  gameendSession?: number;
+  lastGameendReceipt?: GameendReceipt;
+  customItems: number[];
   shutter: number;
   infoLevel: number;
   nameDisp: number;
@@ -48,6 +57,45 @@ type Profile = {
   targetSkill: number;
   comparison: number;
   meterCustom: number[];
+  // Per-game profile state.  GF (K33) and DM (K32) are separate saves on the
+  // original service, so Live Point, play count, unlocks, trophies, customize
+  // state and gameend receipts are isolated per gameCode here.
+  games: { [gameCode: string]: GameState };
+};
+
+type GameState = {
+  playCount: number;
+  livePoint: number;
+  plusLivePoint: number;
+  trophyList: number[];
+  customItems: number[];
+  secretMusic: number[];
+  secretChara: number;
+  xgPlaystyle: number[];
+  style: number;
+  style2: number;
+  infoState: PlayerInfoState;
+  perfect: number;
+  great: number;
+  good: number;
+  poor: number;
+  miss: number;
+  syogo: number[];
+  shutter: number;
+  infoLevel: number;
+  nameDisp: number;
+  auto: number;
+  random: number;
+  judgeLogo: number;
+  skin: number;
+  movie: number;
+  attackEffect: number;
+  layout: number;
+  targetSkill: number;
+  comparison: number;
+  meterCustom: number[];
+  gameendSession: number;
+  lastGameendReceipt?: GameendReceipt;
 };
 
 type CommunityLog = {
@@ -59,6 +107,53 @@ type CommunityLog = {
 };
 
 type CommunityEventLog = CommunityLog;
+
+type SkillTotals = {
+  xgSkill: number;
+  xgAllSkill: number;
+  vSkill: number;
+  vAllSkill: number;
+};
+
+type XgRecentData = {
+  clearNum: number;
+  fullClearNum: number;
+  excellentClearNum: number;
+  maxClearDifficulty: number;
+  maxFullComboDifficulty: number;
+  maxExcellentDifficulty: number;
+  maxSClearDifficulty: number;
+  maxSsClearDifficulty: number;
+  musicIds: number[];
+  maxComboRates: number[];
+  perfectRates: number[];
+  missRates: number[];
+};
+
+type VRecentData = {
+  clearNum: number;
+  fullClearNum: number;
+  excellentClearNum: number;
+  maxClearDifficulty: number;
+  maxFullComboDifficulty: number;
+  maxExcellentDifficulty: number;
+  musicIds: number[];
+  clear: number[];
+  flags: number[];
+  difficulty: number[];
+  comboRates: number[];
+  perfectRates: number[];
+};
+
+type TechnicalStatus = {
+  // game.dll renders ABL_EMB<type><level><skill-colour>.  The two Ability
+  // indices are transported as emblem[1] and emblem[2]; emblem[0] is the
+  // ordinary player emblem/chara field.
+  abilityType: number;
+  abilityLevel: number;
+  xgRecent: XgRecentData;
+  vRecent: VRecentData;
+};
 
 type GroupLog = {
   index: number;
@@ -170,6 +265,241 @@ type ShopTrial = {
   updatedAt: number;
 };
 
+import { isClassicNewMusic, musicMetadata } from './music_data';
+
+const PROFILE_NAME_MAX_LENGTH = 12;
+const PROFILE_REFID_PATTERN = /^[0-9A-F]{16}$/;
+
+function webUIRefid(data: any, send?: WebUISend): string | null {
+  const refid = String((data && data.refid) || '').trim().toUpperCase();
+  if (!PROFILE_REFID_PATTERN.test(refid)) {
+    if (send) send.error(400, 'Invalid profile reference ID.');
+    return null;
+  }
+  return refid;
+}
+
+function strictWebUIInteger(
+  data: any,
+  key: string,
+  minimum: number,
+  maximum: number,
+  send?: WebUISend
+): number | null {
+  const raw = String(data && data[key] !== undefined ? data[key] : '').trim();
+  if (!/^-?\d+$/.test(raw)) {
+    if (send) send.error(400, `${key} must be an integer.`);
+    return null;
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    if (send) {
+      send.error(400, `${key} must be between ${minimum} and ${maximum}.`);
+    }
+    return null;
+  }
+  return value;
+}
+
+function webUICustomSlot(items: number[], index: number, allowBlack = false) {
+  const rawValue = clampInteger(items[index], -1, 0x7fffffff);
+  const livePointMarker = rawValue === index + 1 ? rawValue : null;
+  const validSelection =
+    livePointMarker === null &&
+    ((rawValue >= 0 && rawValue <= 11) || (allowBlack && rawValue === 98));
+  return {
+    selection: validSelection ? rawValue : null,
+    rawValue,
+    livePointMarker,
+  };
+}
+
+export const changeProfileName = async (data: any, send?: WebUISend) => {
+  const refid = webUIRefid(data, send);
+  if (!refid) return;
+
+  const profile = await DB.FindOne<Profile>(refid, { collection: 'profile' });
+  if (!profile) {
+    if (send) send.error(404, 'XG2 profile not found.');
+    return;
+  }
+
+  const name = String((data && data.name) || '').trim().normalize('NFC');
+  if (!name) {
+    if (send) send.error(400, 'Player name cannot be empty.');
+    return;
+  }
+  if (Array.from(name).length > PROFILE_NAME_MAX_LENGTH) {
+    if (send) {
+      send.error(
+        400,
+        `Player name must be ${PROFILE_NAME_MAX_LENGTH} characters or fewer.`
+      );
+    }
+    return;
+  }
+  if (/[\u0000-\u001F\u007F<>&]/.test(name)) {
+    if (send) send.error(400, 'Player name contains unsupported characters.');
+    return;
+  }
+
+  await DB.Update<Profile>(
+    refid,
+    { collection: 'profile' },
+    { $set: { name } }
+  );
+  const updated = await DB.FindOne<Profile>(refid, { collection: 'profile' });
+  if ((!updated || updated.name !== name) && send) {
+    send.error(409, 'Player name was not updated.');
+  }
+};
+
+export const changeProfileGameSettings = async (
+  data: any,
+  send?: WebUISend
+) => {
+  const refid = webUIRefid(data, send);
+  if (!refid) return;
+  const profile = await DB.FindOne<Profile>(refid, { collection: 'profile' });
+  if (!profile) {
+    if (send) send.error(404, 'XG2 profile not found.');
+    return;
+  }
+
+  // lastMode is the only ordinary preference whose complete native enum and
+  // protocol round-trip are confirmed.  Raw Custom slots deliberately remain
+  // read-only here because they share storage with Live Point markers.
+  const lastMode = strictWebUIInteger(data, 'lastMode', 0, 2, send);
+  if (lastMode === null) return;
+  await DB.Update<Profile>(
+    refid,
+    { collection: 'profile' },
+    { $set: { lastMode, modeEncodingVersion: 2 } }
+  );
+  const updated = await DB.FindOne<Profile>(refid, { collection: 'profile' });
+  if (
+    (!updated ||
+      updated.lastMode !== lastMode ||
+      updated.modeEncodingVersion !== 2) &&
+    send
+  ) {
+    send.error(409, 'Game settings were not updated.');
+  }
+};
+
+export const changeGroupIcon = async (data: any, send?: WebUISend) => {
+  const refid = webUIRefid(data, send);
+  if (!refid) return;
+  const profile = await DB.FindOne<Profile>(refid, { collection: 'profile' });
+  if (!profile) {
+    if (send) send.error(404, 'XG2 profile not found.');
+    return;
+  }
+
+  const groupId = Math.floor(Number(profile.groupId) || 0);
+  if (groupId <= 0) {
+    if (send) send.error(404, 'This profile is not in a Group.');
+    return;
+  }
+  const group = await DB.FindOne<Group>({ collection: 'group', groupId });
+  if (!group) {
+    if (send) send.error(404, 'Group not found.');
+    return;
+  }
+  if (String(group.ownerRefid || '').toUpperCase() !== refid) {
+    if (send) send.error(403, 'Only the Group owner can change its icon.');
+    return;
+  }
+
+  const icon = strictWebUIInteger(data, 'icon', 0, 9, send);
+  if (icon === null) return;
+  await DB.Update<Group>(
+    {
+      collection: 'group',
+      groupId,
+      ownerRefid: group.ownerRefid,
+    },
+    { $set: { icon } }
+  );
+  const updated = await DB.FindOne<Group>({ collection: 'group', groupId });
+  if ((!updated || updated.icon !== icon) && send) {
+    send.error(409, 'Group icon was not updated.');
+  }
+};
+
+export const getProfileData = async (data: any, send?: WebUISend) => {
+  const refid = webUIRefid(data, send);
+  if (!refid || !send) return;
+  const profile = await DB.FindOne<Profile>(refid, { collection: 'profile' });
+  if (!profile) {
+    send.error(404, 'XG2 profile not found.');
+    return;
+  }
+
+  const scores = (await DB.Find<Score>(
+    refid,
+    { collection: 'score', schemaVersion: SCORE_SCHEMA_VERSION }
+  )) as Score[];
+  const groupId = Math.floor(Number(profile.groupId) || 0);
+  const group = groupId > 0
+    ? await DB.FindOne<Group>({ collection: 'group', groupId })
+    : null;
+  const lastMode = normalizedProfileLastMode(profile);
+  const gameSettings = ['K32', 'K33'].map(gameCode => {
+    const state = gameStateOf(profile, gameCode);
+    const items = normalizeCustomItems(state.customItems);
+    return {
+      gameCode,
+      playCount: clampU32(state.playCount),
+      livePoint: clampS32(state.livePoint),
+      plusLivePoint: clampS32(state.plusLivePoint),
+      custom: {
+        shutter: webUICustomSlot(items, 31, true),
+        attackEffect: webUICustomSlot(items, 39),
+        judgeText: webUICustomSlot(items, 41),
+        combo: webUICustomSlot(items, 42),
+        notes: webUICustomSlot(items, 46),
+      },
+    };
+  });
+  const skills = ['K32', 'K33'].map(gameCode => {
+    const relevant = scores.filter(
+      score =>
+        score.schemaVersion === SCORE_SCHEMA_VERSION &&
+        String(score.gameCode || '').toUpperCase() === gameCode
+    );
+    return {
+      gameCode,
+      standard: modeSkillBreakdown(relevant, 'standard', gameCode),
+      classic: modeSkillBreakdown(relevant, 'classic', gameCode),
+    };
+  });
+
+  send.json({
+    schemaVersion: 2,
+    profile: {
+      name: String(profile.name || ''),
+      lastMode,
+      groupId,
+    },
+    settings: {
+      lastMode,
+      games: gameSettings,
+    },
+    group: group
+      ? {
+          groupId: group.groupId,
+          name: String(group.name || ''),
+          icon: clampInteger(group.icon, 0, 9),
+          memberCount: (group.memberRefids || []).length,
+          isOwner: String(group.ownerRefid || '').toUpperCase() === refid,
+        }
+      : null,
+    records: mergeProfileScoreRecords(scores),
+    skills,
+  });
+};
+
 type ShopTrialEntry = {
   collection: 'shop_trial_entry';
   cabid: number;
@@ -182,6 +512,7 @@ type ShopTrialEntry = {
   totalPoint: number;
   result: boolean;
   isValid: boolean;
+  rankedAt?: number;
   updatedAt: number;
 };
 
@@ -213,9 +544,10 @@ type GameendReceipt = {
   nowTime: string;
 };
 
-let nextPlaySession = 1;
 const playSessions: { [refid: string]: number } = {};
 const gameendReceipts: { [refid: string]: GameendReceipt } = {};
+const shopTrialEntryQueues: { [key: string]: Promise<void> } = {};
+let groupIdMigrationPromise: Promise<void> | null = null;
 
 const I = (type: string, value: any, attr?: KAttrMap): any =>
   (K.ITEM as any)(type, value, attr);
@@ -224,6 +556,8 @@ const A = (type: string, value: any[], attr?: KAttrMap): any =>
 const zeros = (count: number) => Array(count).fill(0);
 const negatives = (count: number) => Array(count).fill(-1);
 const XG_PLAYSTYLE_COUNT = 50;
+const CUSTOM_ITEM_COUNT = 48;
+const TROPHY_COUNT = 19;
 const SCORE_SCHEMA_VERSION = 2;
 const COMMUNITY_SCHEMA_VERSION = 2;
 const COMMUNITY_TUTORIAL_REWARD_VERSION = 1;
@@ -231,8 +565,20 @@ const MEMBER_PLAY_LOG_COUNT = 15;
 const MEMBER_EVENT_LOG_COUNT = 5;
 const GROUP_PLAY_LOG_COUNT = 15;
 const GROUP_EVENT_LOG_COUNT = 5;
+const GROUP_ID_MIN = 1000000000;
+const GROUP_ID_MAX = 2147483647;
 const X_PLAN_MUSIC_ID = 1834;
 const X_PLAN_TUTORIAL_UNLOCK_MASK = 14;
+const XG_REGULAR_UNLOCK_MASK = 4;
+// gameend.xg_item is the 48-entry Live Point reward catalog consumed by the
+// Result/Records screen.  Each value is a one-based catalog key: the client
+// first matches it against the persisted item[48] milestone markers and then
+// indexes its built-in icon type/resource tables with key - 1.  Skin pack
+// ownership is a separate path rebuilt from groupdata.item[26].
+const LIVE_POINT_REWARD_CATALOG = Array.from(
+  { length: CUSTOM_ITEM_COUNT },
+  (_value, index) => index + 1
+);
 const XG_MDATA_DEFAULT = [-1]
   .concat(Array(8).fill(-2))
   .concat(Array(11).fill(0));
@@ -268,6 +614,24 @@ const COOPERATION_EVENT_IDS: { [gameCode: string]: number[] } = {
     1, 2, 3, 4, 5, 16, 7, 8, 9, 10, 11, 12, 13,
     14, 15, 6, 17, 27, 19, 20, 21, 22, 23, 24, 25, 26,
   ],
+};
+// Completion goals recovered verbatim from data/product/xml/coop_data.xml.
+// The client compares the group_coope total_score of each event against these
+// goals to drive the Group Challenge progress display and its reward grant
+// path (game.dll sub_10078DD0 -> sub_1011BAA0).
+const COOPERATION_GOALS: { [gameCode: string]: { [eventId: number]: number } } = {
+  K33: {
+    1: 13000, 2: 50, 3: 50, 4: 50, 5: 21097, 16: 10000, 7: 18000, 8: 200,
+    9: 30, 10: 2000, 11: 30, 12: 50, 13: 250, 14: 30, 15: 5000, 6: 30000,
+    17: 50, 18: 200, 19: 80000, 20: 200, 21: 10000, 22: 50, 23: 1000,
+    24: 2000, 25: 15000, 26: 300,
+  },
+  K32: {
+    1: 25000, 2: 50, 3: 50, 4: 50, 5: 42195, 16: 20000, 7: 35000, 8: 200,
+    9: 30, 10: 2000, 11: 30, 12: 50, 13: 250, 14: 30, 15: 5000, 6: 50000,
+    17: 50, 27: 200, 19: 150000, 20: 200, 21: 20000, 22: 50, 23: 1000,
+    24: 2000, 25: 30000, 26: 300,
+  },
 };
 
 function configBoolean(key: string, fallback: boolean): boolean {
@@ -330,15 +694,125 @@ function xg2PlusLimit(): number {
   return term > 0 ? XG2_PLUS_BORDERS[term - 1] : -1;
 }
 
-function profilePlusLivePoint(profile: Profile): number {
+function profilePlusLivePoint(state: GameState): number {
   const limit = xg2PlusLimit();
   if (limit < 0) return -1;
   if (xg2PlusUnlockPolicy() === 'all_unlocked') return limit;
-  return Math.max(0, Math.min(limit, profile.plusLivePoint || 0));
+  return Math.max(0, Math.min(limit, state.plusLivePoint || 0));
+}
+
+function defaultGameState(): GameState {
+  return {
+    playCount: 0,
+    livePoint: 0,
+    plusLivePoint: 0,
+    trophyList: negatives(TROPHY_COUNT),
+    customItems: zeros(CUSTOM_ITEM_COUNT),
+    secretMusic: zeros(32),
+    secretChara: 0,
+    xgPlaystyle: [2097152, 0].concat(zeros(48)),
+    style: 2097152,
+    style2: 0,
+    infoState: defaultInfoState(),
+    perfect: 0,
+    great: 0,
+    good: 0,
+    poor: 0,
+    miss: 0,
+    syogo: [0, 0],
+    shutter: 0,
+    infoLevel: 0,
+    nameDisp: 0,
+    auto: 0,
+    random: 0,
+    judgeLogo: 0,
+    skin: 0,
+    movie: 0,
+    attackEffect: 0,
+    layout: 0,
+    targetSkill: 0,
+    comparison: 0,
+    meterCustom: zeros(3),
+    gameendSession: 0,
+  };
+}
+
+function gameStateOf(profile: Profile, gameCode: string): GameState {
+  const code = gameCode.toUpperCase();
+  const stored = profile.games && profile.games[code];
+  return stored ? { ...defaultGameState(), ...stored } : defaultGameState();
+}
+
+function ensureGameState(profile: Profile, gameCode: string): GameState {
+  const code = gameCode.toUpperCase();
+  if (!profile.games) profile.games = {};
+  if (!profile.games[code]) profile.games[code] = defaultGameState();
+  return profile.games[code];
+}
+
+// The GROUP feature is cross-game: a group totals the Live Point its members
+// earned on either cabinet, and a member node reports the same total.  The
+// legacy shared total is included once so a pre-migration profile keeps its
+// value until both games have earned their own state.
+function profileTotalLivePoint(profile: Profile): number {
+  const k33 = profile.games && profile.games.K33;
+  const k32 = profile.games && profile.games.K32;
+  if (k33 || k32) {
+    return gameStateOf(profile, 'K33').livePoint + gameStateOf(profile, 'K32').livePoint;
+  }
+  return Math.max(0, profile.livePoint || 0);
+}
+
+function gameendSessionKey(refid: string, gameCode: string): string {
+  return `${refid}:${gameCode.toUpperCase()}`;
 }
 
 function livePointTerm(): number {
   return configInteger('live_point_term', 6, 0, 6);
+}
+
+function xgBossPayload(): any {
+  return {
+    division: I('u8', configInteger('xg_extra_rush_level', 15, 0, 15)),
+    border: A('u8', zeros(10)),
+    extra_border: I('u8', 90),
+    bsc_encore_border: I('u8', 92),
+    adv_encore_border: I('u8', 93),
+    ext_encore_border: I('u8', 94),
+    ult_encore_border: I('u8', 95),
+    bsc_climax_border: I('u8', 95),
+    adv_climax_border: I('u8', 95),
+    ext_climax_border: I('u8', 95),
+    ult_climax_border: I('u8', 95),
+  };
+}
+
+function vBossPayload(): any {
+  return {
+    division: I('u8', 14),
+    border: A('u8', zeros(9)),
+    extra_border: I('u8', 90),
+    bsc_encore_border: I('u8', 92),
+    adv_encore_border: I('u8', 93),
+    ext_encore_border: I('u8', 94),
+    bsc_premium_border: I('u8', 95),
+    adv_premium_border: I('u8', 95),
+    ext_premium_border: I('u8', 95),
+  };
+}
+
+function demoConfiguration(): {
+  musicId: number;
+  sequenceMode: number;
+  startMs: number;
+  durationMs: number;
+} {
+  return {
+    musicId: configInteger('demo_music_id', 1845, 0, 99999),
+    sequenceMode: configInteger('demo_sequence_mode', 1, 0, 8),
+    startMs: configInteger('demo_start_ms', 58500, 0, 600000),
+    durationMs: configInteger('demo_duration_ms', 9800, 300, 120000),
+  };
 }
 
 function shopChampionshipTerm(): number {
@@ -382,8 +856,32 @@ function cooperationChallengeEnabled(): boolean {
   return configBoolean('cooperation_challenge_enabled', true);
 }
 
+// 'completed' mirrors the archived all-unlock policy used for skin packs and
+// SECRET MUSIC: the group_coope totals are reported at each event's goal so
+// the Group Challenge list shows every challenge cleared, which is the state
+// the already-granted prizes belong to.  'progression' keeps only the real
+// accumulated totals.
+function cooperationCompletionArchived(): boolean {
+  return configString('cooperation_challenge_completion', 'completed') === 'completed';
+}
+
 function cooperationEventIds(gameCode: string): number[] {
   return (COOPERATION_EVENT_IDS[gameCode] || COOPERATION_EVENT_IDS.K33).slice();
+}
+
+function groupPrizeRestorationState(
+  group: Group | null,
+  gameCode: string
+): { groupLevel: number; item: number[] } {
+  if (!group) {
+    return { groupLevel: 0, item: zeros(26) };
+  }
+  // groupdata.get rebuilds the client's owned-prize cache from these local
+  // Cooperation event IDs, and the catalog lookup is gated by group_level.
+  // This server already grants the complete archived prize catalog, so expose
+  // all 26 events at the catalog's maximum level without changing saved LP or
+  // the independently rendered group_coope progression totals.
+  return { groupLevel: 13, item: cooperationEventIds(gameCode) };
 }
 
 function requestGameCode(info: any): string {
@@ -403,6 +901,655 @@ function normalizeNumbers(values: number[] | undefined, count: number, fill = 0)
   return (values || []).slice(0, count).concat(
     Array(Math.max(0, count - (values || []).length)).fill(fill)
   );
+}
+
+function normalizeCustomItems(values: number[] | undefined): number[] {
+  return normalizeNumbers(values, CUSTOM_ITEM_COUNT).map(value =>
+    clampInteger(value, -1, 0x7fffffff)
+  );
+}
+
+function normalizeTrophyList(values: number[] | undefined): number[] {
+  return normalizeNumbers(values, TROPHY_COUNT, -1).map(value => {
+    const trophy = Math.floor(Number(value));
+    return Number.isFinite(trophy) && trophy >= 0 ? Math.min(99, trophy) : -1;
+  });
+}
+
+function mergeTrophyList(previous: number[] | undefined, incoming: number[]): number[] {
+  const merged = normalizeTrophyList(previous);
+  const normalizedIncoming = normalizeTrophyList(incoming);
+  for (let index = 0; index < TROPHY_COUNT; index++) {
+    if (normalizedIncoming[index] >= 0) {
+      // Trophy variants are progressive within each fixed category slot.  A
+      // stale cabinet must not replace an already-earned icon with an older
+      // value, while -1 means "no update" rather than "delete this trophy".
+      merged[index] = Math.max(merged[index], normalizedIncoming[index]);
+    }
+  }
+  return merged;
+}
+
+// Live Point milestones are recorded by the client in the shared 48-slot item
+// array: crossing milestone m (threshold 2500/3750/5000/7500/8750/11250 and
+// then +15000 per eight entries) writes the self-describing marker
+// item[m - 1] = m alongside the Custom selection slots.  Real captures show
+// uploads such as [1], [1,2], [1,2,3] that grow one credit at a time while a
+// boot replays every reached milestone.  A boot that has not replayed them yet
+// uploads fewer markers, so a plain overwrite would erase stored milestones
+// and resurrect the unlock popup on later card-ins.
+function mergeCustomItems(
+  previous: number[] | undefined,
+  incoming: number[] | undefined
+): number[] {
+  const stored = normalizeCustomItems(previous);
+  const uploaded = incoming && incoming.length > 0
+    ? normalizeCustomItems(incoming)
+    : null;
+  if (!uploaded) return stored;
+  return stored.map((value, index) => {
+    const marker = index + 1;
+    // Never let a stale boot drop an already-recorded milestone marker.
+    if (value === marker || uploaded[index] === marker) {
+      return marker;
+    }
+    return uploaded[index];
+  });
+}
+
+function clampS32(value: any): number {
+  return Math.max(0, Math.min(0x7fffffff, Math.floor(Number(value) || 0)));
+}
+
+function clampInteger(value: any, minimum: number, maximum: number): number {
+  return Math.max(
+    minimum,
+    Math.min(maximum, Math.floor(Number(value) || 0))
+  );
+}
+
+function normalizeMusicIds(values: number[] | undefined): number[] {
+  return normalizeNumbers(values, 20, -1).map(value =>
+    clampInteger(value, -1, 0x7fffffff)
+  );
+}
+
+function normalizeRates(values: number[] | undefined): number[] {
+  return normalizeNumbers(values, 20).map(value => clampInteger(value, 0, 100));
+}
+
+function normalizeS8Values(values: number[] | undefined): number[] {
+  return normalizeNumbers(values, 20).map(value => clampInteger(value, 0, 0x7f));
+}
+
+function normalizeU32Values(values: number[] | undefined): number[] {
+  return normalizeNumbers(values, 20).map(clampU32);
+}
+
+function emptyXgRecentData(): XgRecentData {
+  return {
+    clearNum: 0,
+    fullClearNum: 0,
+    excellentClearNum: 0,
+    maxClearDifficulty: 0,
+    maxFullComboDifficulty: 0,
+    maxExcellentDifficulty: 0,
+    maxSClearDifficulty: 0,
+    maxSsClearDifficulty: 0,
+    musicIds: negatives(20),
+    maxComboRates: zeros(20),
+    perfectRates: zeros(20),
+    missRates: zeros(20),
+  };
+}
+
+function emptyVRecentData(): VRecentData {
+  return {
+    clearNum: 0,
+    fullClearNum: 0,
+    excellentClearNum: 0,
+    maxClearDifficulty: 0,
+    maxFullComboDifficulty: 0,
+    maxExcellentDifficulty: 0,
+    musicIds: negatives(20),
+    clear: zeros(20),
+    flags: zeros(20),
+    difficulty: zeros(20),
+    comboRates: zeros(20),
+    perfectRates: zeros(20),
+  };
+}
+
+function emptyTechnicalStatus(): TechnicalStatus {
+  return {
+    abilityType: 0,
+    abilityLevel: 0,
+    xgRecent: emptyXgRecentData(),
+    vRecent: emptyVRecentData(),
+  };
+}
+
+function normalizeXgRecentData(value: Partial<XgRecentData> | undefined): XgRecentData {
+  const source = value || {};
+  return {
+    clearNum: clampU32(source.clearNum),
+    fullClearNum: clampU32(source.fullClearNum),
+    excellentClearNum: clampU32(source.excellentClearNum),
+    maxClearDifficulty: clampS32(source.maxClearDifficulty),
+    maxFullComboDifficulty: clampS32(source.maxFullComboDifficulty),
+    maxExcellentDifficulty: clampS32(source.maxExcellentDifficulty),
+    maxSClearDifficulty: clampS32(source.maxSClearDifficulty),
+    maxSsClearDifficulty: clampS32(source.maxSsClearDifficulty),
+    musicIds: normalizeMusicIds(source.musicIds),
+    maxComboRates: normalizeRates(source.maxComboRates),
+    perfectRates: normalizeRates(source.perfectRates),
+    missRates: normalizeRates(source.missRates),
+  };
+}
+
+function normalizeVRecentData(value: Partial<VRecentData> | undefined): VRecentData {
+  const source = value || {};
+  return {
+    clearNum: clampU32(source.clearNum),
+    fullClearNum: clampU32(source.fullClearNum),
+    excellentClearNum: clampU32(source.excellentClearNum),
+    maxClearDifficulty: clampInteger(source.maxClearDifficulty, 0, 0x7f),
+    maxFullComboDifficulty: clampInteger(source.maxFullComboDifficulty, 0, 0x7f),
+    maxExcellentDifficulty: clampInteger(source.maxExcellentDifficulty, 0, 0x7f),
+    musicIds: normalizeMusicIds(source.musicIds),
+    clear: normalizeS8Values(source.clear),
+    flags: normalizeU32Values(source.flags),
+    difficulty: normalizeS8Values(source.difficulty),
+    comboRates: normalizeRates(source.comboRates),
+    perfectRates: normalizeRates(source.perfectRates),
+  };
+}
+
+function normalizeTechnicalStatus(value: Partial<TechnicalStatus> | undefined): TechnicalStatus {
+  const source = value || {};
+  return {
+    // tex_gf_ability.bin contains ABL_EMB types 1..4 and levels 0..2;
+    // 0/0 selects the neutral placeholder for a profile with no play history.
+    abilityType: clampInteger(source.abilityType, 0, 4),
+    abilityLevel: clampInteger(source.abilityLevel, 0, 2),
+    xgRecent: normalizeXgRecentData(source.xgRecent),
+    vRecent: normalizeVRecentData(source.vRecent),
+  };
+}
+
+function technicalStatusKey(gameCode: string): string {
+  return gameCode.toUpperCase();
+}
+
+function profileTechnicalStatus(profile: Profile, gameCode: string): TechnicalStatus {
+  return normalizeTechnicalStatus(
+    profile.technicalStatus && profile.technicalStatus[technicalStatusKey(gameCode)]
+  );
+}
+
+function profileEmblem(profile: Profile | null, gameCode: string): number[] {
+  if (!profile) return [0, 0, 0];
+  const technical = profileTechnicalStatus(profile, gameCode);
+  return [profile.chara, technical.abilityType, technical.abilityLevel];
+}
+
+function uploadedTechnicalStatus(playerInfo: any, previous: TechnicalStatus): TechnicalStatus {
+  const emblem = playerInfo.numbers('emblem', []);
+  const xgElement = playerInfo.element('xg_recent');
+  const vElement = playerInfo.element('v_recent');
+  const xg = xgElement ? $(xgElement.obj) : null;
+  const v = vElement ? $(vElement.obj) : null;
+
+  const xgRecent = xg
+    ? normalizeXgRecentData({
+        clearNum: xg.number('clear_num', previous.xgRecent.clearNum),
+        fullClearNum: xg.number('full_clear_num', previous.xgRecent.fullClearNum),
+        excellentClearNum: xg.number('exc_clear_num', previous.xgRecent.excellentClearNum),
+        maxClearDifficulty: xg.number(
+          'max_clear_difficulty',
+          previous.xgRecent.maxClearDifficulty
+        ),
+        maxFullComboDifficulty: xg.number(
+          'max_fullcombo_clear_difficulty',
+          previous.xgRecent.maxFullComboDifficulty
+        ),
+        maxExcellentDifficulty: xg.number(
+          'max_excellent_clear_difficulty',
+          previous.xgRecent.maxExcellentDifficulty
+        ),
+        maxSClearDifficulty: xg.number(
+          'max_s_clear_difficulty',
+          previous.xgRecent.maxSClearDifficulty
+        ),
+        maxSsClearDifficulty: xg.number(
+          'max_ss_clear_difficulty',
+          previous.xgRecent.maxSsClearDifficulty
+        ),
+        musicIds: xg.numbers('musicid', previous.xgRecent.musicIds),
+        maxComboRates: xg.numbers('maxcombo_rate', previous.xgRecent.maxComboRates),
+        perfectRates: xg.numbers('perfect_rate', previous.xgRecent.perfectRates),
+        missRates: xg.numbers('miss_rate', previous.xgRecent.missRates),
+      })
+    : previous.xgRecent;
+
+  const vRecent = v
+    ? normalizeVRecentData({
+        clearNum: v.number('clear_num', previous.vRecent.clearNum),
+        fullClearNum: v.number('full_clear_num', previous.vRecent.fullClearNum),
+        excellentClearNum: v.number('exc_clear_num', previous.vRecent.excellentClearNum),
+        maxClearDifficulty: v.number(
+          'max_clear_difficulty',
+          previous.vRecent.maxClearDifficulty
+        ),
+        maxFullComboDifficulty: v.number(
+          'max_fullcombo_difficulty',
+          previous.vRecent.maxFullComboDifficulty
+        ),
+        maxExcellentDifficulty: v.number(
+          'max_excellent_difficulty',
+          previous.vRecent.maxExcellentDifficulty
+        ),
+        musicIds: v.numbers('musicid', previous.vRecent.musicIds),
+        clear: v.numbers('clear', previous.vRecent.clear),
+        flags: v.numbers('flags', previous.vRecent.flags),
+        difficulty: v.numbers('difficulty', previous.vRecent.difficulty),
+        comboRates: v.numbers('combo_rate', previous.vRecent.comboRates),
+        perfectRates: v.numbers('perfect_rate', previous.vRecent.perfectRates),
+      })
+    : previous.vRecent;
+
+  return normalizeTechnicalStatus({
+    abilityType: emblem.length > 1 ? emblem[1] : previous.abilityType,
+    abilityLevel: emblem.length > 2 ? emblem[2] : previous.abilityLevel,
+    xgRecent,
+    vRecent,
+  });
+}
+
+function nextGameendSession(current: any): number {
+  const value = clampS32(current);
+  return value >= 0x7fffffff ? 1 : value + 1;
+}
+
+function compactRequestFingerprint(data: any): string {
+  const normalized = stableReplacer(data);
+  const serialized = JSON.stringify(normalized);
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < serialized.length; index++) {
+    const code = serialized.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b) + index | 0;
+  }
+  return `${serialized.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
+}
+
+function stableReplacer(value: any, depth = 0): any {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== 'object') return value;
+  if (depth > 12) return value;
+
+  if (Array.isArray(value)) {
+    return value.map(item => stableReplacer(item, depth + 1));
+  }
+
+  const filteredEntries = Object.entries(value)
+    .filter(([key]) => {
+      const normalizedKey = String(key).toLowerCase();
+      if (normalizedKey === 'status' || normalizedKey === 'request') return false;
+      if (normalizedKey === 'now_time' || normalizedKey === 'nowtime') return false;
+      if (normalizedKey === 'cardrefid') return false;
+      if (
+        normalizedKey === 'time' ||
+        normalizedKey === 'date' ||
+        normalizedKey.endsWith('_time') ||
+        normalizedKey.endsWith('_date')
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => (left[0] > right[0] ? 1 : left[0] < right[0] ? -1 : 0));
+
+  const normalized: { [key: string]: any } = {};
+  for (const [key, valueToReplace] of filteredEntries) {
+    normalized[key] = stableReplacer(valueToReplace, depth + 1);
+  }
+  return normalized;
+}
+
+function emptySkillTotals(): SkillTotals {
+  return { xgSkill: 0, xgAllSkill: 0, vSkill: 0, vAllSkill: 0 };
+}
+
+function skillStorageKey(gameCode: string, kind: number): string {
+  return `${gameCode.toUpperCase()}:${Math.max(0, Math.floor(kind))}`;
+}
+
+function normalizedProfileLastMode(profile: Profile): number {
+  const raw = Math.floor(Number(profile.lastMode) || 0);
+  if (profile.modeEncodingVersion === 2) return clampInteger(raw, 0, 2);
+  if (raw === 4) return 2;
+  if (raw === 2) return 1;
+  return 0;
+}
+
+function titleForMusic(musicId: number): string {
+  const metadata = musicMetadata(musicId);
+  return metadata ? metadata.titleName : `Music ${Math.max(0, Math.floor(musicId))}`;
+}
+
+function modeSkillBreakdown(
+  scores: Score[],
+  playMode: Score['playMode'],
+  gameCode: string
+) {
+  const perMusic: {
+    [musicId: string]: { musicId: number; point: number; seqMode: number };
+  } = {};
+  for (const score of scores) {
+    if (score.playMode !== playMode) continue;
+    const rawMusicId = Number(score.musicId);
+    if (!Number.isFinite(rawMusicId)) continue;
+    const musicId = Math.floor(rawMusicId);
+    if (musicId < 0) continue;
+    const point = clampS32(score.skillPoint);
+    const rawSeqMode = Number(score.seqMode);
+    const seqMode = Number.isFinite(rawSeqMode)
+      ? Math.max(0, Math.floor(rawSeqMode))
+      : 0;
+    const previous = perMusic[String(musicId)];
+    if (
+      !previous ||
+      point > previous.point ||
+      (point === previous.point && seqMode < previous.seqMode)
+    ) {
+      perMusic[String(musicId)] = { musicId, point, seqMode };
+    }
+  }
+
+  const entries = Object.keys(perMusic).map(musicId => {
+    const entry = perMusic[musicId];
+    const metadata = musicMetadata(entry.musicId);
+    return {
+      ...entry,
+      titleName: titleForMusic(entry.musicId),
+      isLong: !!(metadata && metadata.isLong),
+      isClassicNew: isClassicNewMusic(entry.musicId, gameCode),
+    };
+  });
+  const descending = (
+    left: { musicId: number; point: number },
+    right: { musicId: number; point: number }
+  ) => right.point - left.point || left.musicId - right.musicId;
+  // Standard uses new 25 + old 25, with XG2 songs identified as 1800..1873.
+  // Classic uses new 14 + old 36 + LONG 3. Its new pool is the current V8
+  // generation from MDB first_classic_ver (K33/GF=18, K32/DM=17), not the XG2
+  // ID range. Classic LONG songs are excluded from both normal pools so one
+  // song cannot be selected twice. all_point remains every stored song best.
+  const newLimit = playMode === 'classic' ? 14 : 25;
+  const oldLimit = playMode === 'classic' ? 36 : 25;
+  const longLimit = playMode === 'classic' ? 3 : 0;
+  const normalEntries = playMode === 'classic'
+    ? entries.filter(value => !value.isLong)
+    : entries;
+  const newSongs = normalEntries
+    .filter(value =>
+      playMode === 'classic'
+        ? value.isClassicNew
+        : value.musicId >= 1800 && value.musicId <= 1873
+    )
+    .sort(descending)
+    .map((value, index) => ({
+      ...value,
+      rank: index + 1,
+      selected: index < newLimit,
+    }));
+  const oldSongs = normalEntries
+    .filter(value =>
+      playMode === 'classic'
+        ? !value.isClassicNew
+        : value.musicId < 1800 || value.musicId > 1873
+    )
+    .sort(descending)
+    .map((value, index) => ({
+      ...value,
+      rank: index + 1,
+      selected: index < oldLimit,
+    }));
+  const longSongs = playMode === 'classic'
+    ? entries
+        .filter(value => value.isLong)
+        .sort(descending)
+        .map((value, index) => ({
+          ...value,
+          rank: index + 1,
+          selected: index < longLimit,
+        }))
+    : [];
+  const newSkill = newSongs
+    .slice(0, newLimit)
+    .reduce((sum, value) => sum + value.point, 0);
+  const oldSkill = oldSongs
+    .slice(0, oldLimit)
+    .reduce((sum, value) => sum + value.point, 0);
+  const longSkill = longSongs
+    .slice(0, longLimit)
+    .reduce((sum, value) => sum + value.point, 0);
+  const allSkill = entries.reduce((sum, value) => sum + value.point, 0);
+  return {
+    playMode,
+    displayedSkill: clampS32(newSkill + oldSkill + longSkill),
+    allPoint: clampS32(allSkill),
+    newPoint: clampS32(newSkill),
+    oldPoint: clampS32(oldSkill),
+    longPoint: clampS32(longSkill),
+    limits: {
+      newSongs: newLimit,
+      oldSongs: oldLimit,
+      longSongs: longLimit,
+    },
+    newSongs,
+    oldSongs,
+    longSongs,
+  };
+}
+
+function modeSkillTotals(
+  scores: Score[],
+  playMode: Score['playMode'],
+  gameCode: string
+): [number, number] {
+  const breakdown = modeSkillBreakdown(scores, playMode, gameCode);
+  return [breakdown.displayedSkill, breakdown.allPoint];
+}
+
+function mergeProfileScoreRecords(scores: Score[]) {
+  type RecordRow = {
+    gameCode: string;
+    playMode: 'standard' | 'classic';
+    musicId: number;
+    titleName: string;
+    seqMode: number;
+    score: number;
+    achievement: number;
+    resultRank: number;
+    combo: number;
+    skillPoint: number;
+    clear: number;
+    fullCombo: number;
+    excellent: number;
+    difficulty: number;
+    comboRate: number;
+    perfectRate: number;
+    attempts: number;
+    updatedAt: number;
+    kinds: number[];
+  };
+  const merged: { [key: string]: RecordRow } = {};
+  for (const score of scores) {
+    if (score.schemaVersion !== SCORE_SCHEMA_VERSION) continue;
+    const gameCode = String(score.gameCode || '').toUpperCase();
+    if (gameCode !== 'K32' && gameCode !== 'K33') continue;
+    if (score.playMode !== 'standard' && score.playMode !== 'classic') continue;
+    const musicId = Math.floor(Number(score.musicId));
+    const seqMode = Math.floor(Number(score.seqMode));
+    if (!Number.isFinite(musicId) || musicId < 0) continue;
+    const maximumSeqMode = score.playMode === 'classic' ? 9 : 8;
+    if (
+      !Number.isFinite(seqMode) ||
+      seqMode < 1 ||
+      seqMode > maximumSeqMode
+    ) continue;
+    const kind = Math.max(0, Math.floor(Number(score.kind) || 0));
+    const key = `${gameCode}:${score.playMode}:${musicId}:${seqMode}`;
+    const incoming: RecordRow = {
+      gameCode,
+      playMode: score.playMode,
+      musicId,
+      titleName: titleForMusic(musicId),
+      seqMode,
+      score: clampU32(score.score),
+      achievement: normalizeAchievement(score.skillPercent),
+      resultRank: normalizeResultRank(score.resultRank),
+      combo: clampU32(score.combo),
+      skillPoint: clampS32(score.skillPoint),
+      clear: Math.max(0, Math.floor(Number(score.clear) || 0)),
+      fullCombo: Math.max(0, Math.floor(Number(score.fullCombo) || 0)),
+      excellent: Math.max(0, Math.floor(Number(score.excellent) || 0)),
+      difficulty: Math.max(0, Math.floor(Number(score.difficulty) || 0)),
+      comboRate: Math.max(0, Math.floor(Number(score.comboRate) || 0)),
+      perfectRate: Math.max(0, Math.floor(Number(score.perfectRate) || 0)),
+      attempts: Math.max(1, Math.floor(Number(score.attempts) || 0)),
+      updatedAt: Math.max(0, Math.floor(Number(score.updatedAt) || 0)),
+      kinds: [kind],
+    };
+    const previous = merged[key];
+    if (!previous) {
+      merged[key] = incoming;
+      continue;
+    }
+
+    previous.score = Math.max(previous.score, incoming.score);
+    previous.achievement = Math.max(previous.achievement, incoming.achievement);
+    previous.resultRank = Math.max(previous.resultRank, incoming.resultRank);
+    previous.combo = Math.max(previous.combo, incoming.combo);
+    previous.skillPoint = Math.max(previous.skillPoint, incoming.skillPoint);
+    previous.clear = Math.max(previous.clear, incoming.clear);
+    previous.fullCombo = Math.max(previous.fullCombo, incoming.fullCombo);
+    previous.excellent = Math.max(previous.excellent, incoming.excellent);
+    previous.difficulty = Math.max(previous.difficulty, incoming.difficulty);
+    previous.comboRate = Math.max(previous.comboRate, incoming.comboRate);
+    previous.perfectRate = Math.max(previous.perfectRate, incoming.perfectRate);
+    previous.attempts = clampU32(previous.attempts + incoming.attempts);
+    previous.updatedAt = Math.max(previous.updatedAt, incoming.updatedAt);
+    if (!previous.kinds.includes(kind)) previous.kinds.push(kind);
+  }
+
+  const modeOrder: { [mode: string]: number } = { standard: 0, classic: 1 };
+  return Object.keys(merged)
+    .map(key => ({
+      ...merged[key],
+      kinds: merged[key].kinds.sort((left, right) => left - right),
+    }))
+    .sort(
+      (left, right) =>
+        left.gameCode.localeCompare(right.gameCode) ||
+        modeOrder[left.playMode] - modeOrder[right.playMode] ||
+        left.musicId - right.musicId ||
+        left.seqMode - right.seqMode
+    );
+}
+
+function calculateSkillTotals(
+  scores: Score[],
+  gameCode: string,
+  _kind: number
+): SkillTotals {
+  // The upload `kind` marks the credit's stage context (real captures show
+  // kind=2 for EXTRA STAGE and kind=4 for CLIMAX STAGE plays of the same
+  // chart).  It is not a records partition: bests merge across kinds exactly
+  // as they do across duplicate documents.
+  const relevant = scores.filter(score =>
+    score.schemaVersion === SCORE_SCHEMA_VERSION &&
+    score.gameCode === gameCode
+  );
+  const [xgSkill, xgAllSkill] = modeSkillTotals(relevant, 'standard', gameCode);
+  const [vSkill, vAllSkill] = modeSkillTotals(relevant, 'classic', gameCode);
+  return { xgSkill, xgAllSkill, vSkill, vAllSkill };
+}
+
+function recoverScoreTrophies(
+  trophyList: number[] | undefined,
+  scores: Score[],
+  gameCode: string,
+  _kind: number
+): number[] {
+  const recovered = normalizeTrophyList(trophyList);
+  const relevant = scores.filter(score =>
+    score.schemaVersion === SCORE_SCHEMA_VERSION &&
+    score.gameCode === gameCode
+  );
+  // These three values were captured from the real XG2 client.  They provide
+  // a safe lazy migration for profiles whose earlier server response erased
+  // the trophy list before this field was persisted.
+  if (relevant.some(score => score.fullCombo > 0)) recovered[4] = Math.max(recovered[4], 1);
+  if (relevant.some(score => score.excellent > 0)) recovered[5] = Math.max(recovered[5], 2);
+  if (relevant.some(score => score.playMode === 'standard' && score.skillPoint > 0)) {
+    recovered[18] = Math.max(recovered[18], 17);
+  }
+  return recovered;
+}
+
+function sameNumbers(left: number[] | undefined, right: number[]): boolean {
+  const normalized = normalizeTrophyList(left);
+  return normalized.every((value, index) => value === right[index]);
+}
+
+function sameSkillTotals(left: SkillTotals | undefined, right: SkillTotals): boolean {
+  return !!left &&
+    left.xgSkill === right.xgSkill &&
+    left.xgAllSkill === right.xgAllSkill &&
+    left.vSkill === right.vSkill &&
+    left.vAllSkill === right.vAllSkill;
+}
+
+async function hydrateProfileProgress(
+  refid: string,
+  profile: Profile,
+  gameCode: string,
+  kind: number,
+  suppliedScores?: Score[]
+): Promise<{ skills: SkillTotals; trophyList: number[] }> {
+  const state = ensureGameState(profile, gameCode);
+  if (!refid) return { skills: emptySkillTotals(), trophyList: normalizeTrophyList(state.trophyList) };
+  const scores = suppliedScores || await DB.Find<Score>(refid, { collection: 'score' }) as Score[];
+  const skills = calculateSkillTotals(scores, gameCode, kind);
+  const trophyList = recoverScoreTrophies(state.trophyList, scores, gameCode, kind);
+  const key = skillStorageKey(gameCode, kind);
+  const skillData = { ...(profile.skillData || {}), [key]: skills };
+  if (!sameSkillTotals(profile.skillData && profile.skillData[key], skills) ||
+      !sameNumbers(state.trophyList, trophyList)) {
+    await DB.Update<Profile>(
+      refid,
+      { collection: 'profile' },
+      { $set: { skillData, games: profile.games } }
+    );
+  }
+  profile.skillData = skillData;
+  state.trophyList = trophyList;
+  return { skills, trophyList };
+}
+
+function skillResponse(point: number, allPoint: number): any {
+  return {
+    point: I('s32', point),
+    rank: I('u32', 1),
+    total_nr: I('u32', 1),
+    all_point: I('s32', allPoint),
+    all_rank: I('u32', 1),
+    all_total_nr: I('u32', 1),
+  };
 }
 
 function clampU32(value: any): number {
@@ -622,6 +1769,45 @@ const XG_SECRET_MUSIC: Array<[number, number]> = [
   [1873, 11],
 ];
 
+// xg_seq_flag is MDB chart metadata, not a complete player-unlock mask.  The
+// archived server exposes every listed SECRET MUSIC chart, so explicitly add
+// the REGULAR bit that the client tests when it builds the difficulty list.
+function archivedXgSecretSequenceMask(mdbSequenceFlag: number): number {
+  return mdbSequenceFlag | XG_REGULAR_UNLOCK_MASK;
+}
+
+// Chart-availability bits inside a secret-music sequence mask, recovered from
+// game.dll sub_10095B00/sub_100974D0: bit1=BASIC, bit2=ADVANCED, bit3=EXTREME,
+// bit4=MASTER.  The runtime grant tiers are 2/6/14/30, so 0x1e is the full
+// four-chart grant the client itself hands out on the ENCORE/CLIMAX unlock
+// path (sub_1007A400 -> sub_1006F5C0).
+const XG_CHART_TIER_FULL_MASK = 0x1e;
+
+// Songs whose xg_diff_list carries a fourth chart slot (MASTER), generated
+// from data/product/xml/mdb_xg_aou.xml.  xg_diff_list groups: [1..4]=Guitar,
+// [6..9]=Bass, [11..14]=Drum; GF and DM tables happen to be identical here.
+const MASTER_CHART_MUSIC: { [gameCode: string]: number[] } = {
+  K33: [
+    305, 403, 504, 602, 618, 619, 752, 839, 902, 905, 917, 920,
+    1004, 1127, 1131, 1213, 1300, 1422, 1436, 1437, 1502, 1506, 1517, 1520,
+    1524, 1548, 1600, 1603, 1612, 1613, 1621, 1630, 1649, 1701, 1704, 1705,
+    1706, 1711, 1712, 1721, 1722, 1727, 1728, 1729, 1731, 1735, 1741, 1744,
+    1745, 1801, 1802, 1805, 1811, 1814, 1823, 1826, 1831, 1838, 1852,
+  ],
+  K32: [
+    305, 403, 504, 602, 618, 619, 752, 839, 902, 905, 917, 920,
+    1004, 1127, 1131, 1213, 1300, 1422, 1436, 1437, 1502, 1506, 1517, 1520,
+    1524, 1548, 1600, 1603, 1612, 1613, 1621, 1630, 1649, 1701, 1704, 1705,
+    1706, 1711, 1712, 1721, 1722, 1727, 1728, 1729, 1731, 1735, 1741, 1744,
+    1745, 1801, 1802, 1805, 1811, 1814, 1823, 1826, 1831, 1838, 1852,
+  ],
+};
+
+function masterChartUnlockPolicy(): string {
+  const value = configString('master_chart_unlock_policy', 'all_unlocked');
+  return value === 'played' || value === 'off' ? value : 'all_unlocked';
+}
+
 const protocolTime = () =>
   new Date().toISOString().replace('T', ' ').replace('Z', '+00:00');
 
@@ -718,6 +1904,10 @@ function defaultProfile(name = 'PLAYER', chara = 0): Profile {
     playCount: 0,
     livePoint: 0,
     plusLivePoint: 0,
+    trophyList: negatives(TROPHY_COUNT),
+    skillData: {},
+    technicalStatus: {},
+    customItems: zeros(CUSTOM_ITEM_COUNT),
     shutter: 0,
     infoLevel: 0,
     nameDisp: 0,
@@ -731,10 +1921,111 @@ function defaultProfile(name = 'PLAYER', chara = 0): Profile {
     targetSkill: 0,
     comparison: 0,
     meterCustom: zeros(3),
+    games: {},
   };
 }
 
+function isSearchableGroupId(groupId: number): boolean {
+  return Number.isSafeInteger(groupId) &&
+    groupId >= GROUP_ID_MIN &&
+    groupId <= GROUP_ID_MAX;
+}
+
+function availableGroupId(used: Set<number>, preferred = GROUP_ID_MIN): number {
+  let candidate = Math.max(GROUP_ID_MIN, Math.trunc(preferred));
+  while (candidate <= GROUP_ID_MAX && used.has(candidate)) candidate++;
+  if (candidate <= GROUP_ID_MAX) return candidate;
+  candidate = GROUP_ID_MIN;
+  while (candidate < preferred && used.has(candidate)) candidate++;
+  if (candidate < preferred) return candidate;
+  throw new Error('No signed-s32 10-digit GroupID remains available');
+}
+
+async function migrateSearchableGroupIds(): Promise<void> {
+  const groups = await DB.Find<Group>({ collection: 'group' });
+  const used = new Set<number>(
+    groups.map(group => group.groupId).filter(isSearchableGroupId)
+  );
+  const legacyIdMap = new Map<number, number>();
+  const ordered = groups.slice().sort(
+    (left, right) =>
+      (left.groupId || 0) - (right.groupId || 0) ||
+      (left._id || '').localeCompare(right._id || '')
+  );
+
+  for (const group of ordered) {
+    const oldGroupId = Number(group.groupId) || 0;
+    if (isSearchableGroupId(oldGroupId)) continue;
+    const deterministic = oldGroupId > 0
+      ? GROUP_ID_MIN + oldGroupId
+      : GROUP_ID_MIN;
+    const newGroupId = availableGroupId(
+      used,
+      deterministic <= GROUP_ID_MAX ? deterministic : GROUP_ID_MIN
+    );
+    used.add(newGroupId);
+    if (!legacyIdMap.has(oldGroupId)) legacyIdMap.set(oldGroupId, newGroupId);
+    await DB.Update<Group>(
+      group._id
+        ? ({ collection: 'group', _id: group._id } as any)
+        : {
+            collection: 'group',
+            groupId: oldGroupId,
+            ownerRefid: group.ownerRefid,
+          },
+      { $set: { groupId: newGroupId } }
+    );
+    group.groupId = newGroupId;
+  }
+
+  // Repair both normal migrations and a previous interrupted migration.  The
+  // persisted member list is authoritative when a profile still points at an
+  // old short GroupID after the group document itself was already upgraded.
+  const memberGroupIds = new Map<string, number>();
+  for (const group of ordered) {
+    if (!isSearchableGroupId(group.groupId)) continue;
+    for (const refid of group.memberRefids || []) {
+      if (refid && !memberGroupIds.has(refid)) {
+        memberGroupIds.set(refid, group.groupId);
+      }
+    }
+  }
+  const profiles = await DB.Find<Profile>(null, { collection: 'profile' });
+  for (const profile of profiles) {
+    const refid = profile.__refid || '';
+    if (!refid) continue;
+    const oldGroupId = Number(profile.groupId) || 0;
+    let newGroupId = memberGroupIds.get(refid);
+    if (newGroupId === undefined && legacyIdMap.has(oldGroupId)) {
+      newGroupId = legacyIdMap.get(oldGroupId);
+    }
+    if (newGroupId === undefined && oldGroupId > 0 && !isSearchableGroupId(oldGroupId)) {
+      newGroupId = 0;
+    }
+    if (newGroupId !== undefined && newGroupId !== oldGroupId) {
+      await DB.Update<Profile>(
+        refid,
+        { collection: 'profile' },
+        { $set: { groupId: newGroupId } }
+      );
+    }
+  }
+}
+
+async function ensureSearchableGroupIds(): Promise<void> {
+  if (!groupIdMigrationPromise) {
+    groupIdMigrationPromise = migrateSearchableGroupIds();
+  }
+  try {
+    await groupIdMigrationPromise;
+  } catch (error) {
+    groupIdMigrationPromise = null;
+    throw error;
+  }
+}
+
 async function findProfile(refid: string): Promise<Profile | null> {
+  await ensureSearchableGroupIds();
   const stored = await DB.FindOne<Profile>(refid, { collection: 'profile' });
   if (!stored) return null;
   const legacyInfo = defaultInfoState();
@@ -831,6 +2122,17 @@ async function findProfile(refid: string): Promise<Profile | null> {
     tutorialMigrationChanged = true;
   }
 
+  const customItems = normalizeCustomItems(stored.customItems);
+  const customItemMigrationChanged = !stored.customItems;
+  if (!stored.customItems) {
+    // The old split customize schema never covered the complete 48-slot
+    // client state.  Preserve only the three mappings proven by the menu
+    // dispatcher instead of guessing the Combo/Notes slots.
+    customItems[31] = clampInteger(stored.shutter, 0, 98);
+    customItems[39] = clampInteger(stored.attackEffect, 0, 11);
+    customItems[41] = clampInteger(stored.judgeLogo, 0, 11);
+  }
+
   const profile: Profile = {
     ...defaultProfile(),
     ...stored,
@@ -857,8 +2159,65 @@ async function findProfile(refid: string): Promise<Profile | null> {
     communityTutorialRewardVersion: tutorialRewardVersion,
     livePoint: Math.max(0, stored.livePoint || 0),
     plusLivePoint: Math.max(0, stored.plusLivePoint || 0),
+    trophyList: normalizeTrophyList(stored.trophyList),
+    skillData: stored.skillData || {},
+    technicalStatus: stored.technicalStatus || {},
+    customItems,
+    games: {},
   };
-  if (tutorialMigrationChanged) {
+  // One-time split of the legacy shared profile state into per-game saves.
+  // The game that actually owns the retained scores keeps the history; the
+  // other game starts from a clean state, matching the original service where
+  // GF and DM profiles were independent.
+  if (!stored.games) {
+    const storedScores = refid
+      ? ((await DB.Find<Score>(refid, { collection: 'score' })) as Score[])
+      : [];
+    const k33Plays = storedScores.filter(score => score.gameCode === 'K33').length;
+    const k32Plays = storedScores.filter(score => score.gameCode === 'K32').length;
+    const owner = k32Plays > k33Plays ? 'K32' : 'K33';
+    const legacyState: GameState = {
+      playCount: profile.playCount,
+      livePoint: profile.livePoint,
+      plusLivePoint: profile.plusLivePoint,
+      trophyList: normalizeTrophyList(stored.trophyList),
+      customItems,
+      secretMusic: profile.secretMusic,
+      secretChara: profile.secretChara,
+      xgPlaystyle: legacyPlaystyle,
+      style: profile.style,
+      style2: profile.style2,
+      infoState: profile.infoState,
+      perfect: profile.perfect,
+      great: profile.great,
+      good: profile.good,
+      poor: profile.poor,
+      miss: profile.miss,
+      syogo: profile.syogo,
+      shutter: profile.shutter,
+      infoLevel: profile.infoLevel,
+      nameDisp: profile.nameDisp,
+      auto: profile.auto,
+      random: profile.random,
+      judgeLogo: profile.judgeLogo,
+      skin: profile.skin,
+      movie: profile.movie,
+      attackEffect: profile.attackEffect,
+      layout: profile.layout,
+      targetSkill: profile.targetSkill,
+      comparison: profile.comparison,
+      meterCustom: profile.meterCustom,
+      gameendSession: clampS32(stored.gameendSession),
+      lastGameendReceipt: stored.lastGameendReceipt,
+    };
+    profile.games = {
+      K33: owner === 'K33' ? legacyState : defaultGameState(),
+      K32: owner === 'K32' ? legacyState : defaultGameState(),
+    };
+  } else {
+    profile.games = stored.games;
+  }
+  if (tutorialMigrationChanged || customItemMigrationChanged || !stored.games) {
     await DB.Update<Profile>(
       refid,
       { collection: 'profile' },
@@ -870,6 +2229,8 @@ async function findProfile(refid: string): Promise<Profile | null> {
           communityEventLogs: profile.communityEventLogs,
           communitySchemaVersion: COMMUNITY_SCHEMA_VERSION,
           communityTutorialRewardVersion: profile.communityTutorialRewardVersion,
+          customItems: profile.customItems,
+          games: profile.games,
         },
       }
     );
@@ -936,7 +2297,7 @@ export const gameinfoGet: EPR = async (_info, _data, send) => {
       value => festivalMode !== 'off' || value[0] !== 1843
     );
   const ids = freeSongs.map(value => value[0]);
-  const sequences = freeSongs.map(value => value[1]);
+  const sequences = freeSongs.map(value => archivedXgSecretSequenceMask(value[1]));
   const xgFreeMusic = ids.concat(negatives(155 - ids.length));
   const xgFreeSequence = sequences.concat(zeros(155 - sequences.length));
   const tag = crc8(String(vFreeMusic + ids.reduce((sum, value) => sum + value, 0)));
@@ -956,30 +2317,8 @@ export const gameinfoGet: EPR = async (_info, _data, send) => {
       free_seq: I('u32', vFreeMusic),
     },
     tag: I('u8', tag),
-    xg_bossdata: {
-      division: I('u8', configInteger('xg_extra_rush_level', 15, 0, 15)),
-      border: A('u8', zeros(10)),
-      extra_border: I('u8', 90),
-      bsc_encore_border: I('u8', 92),
-      adv_encore_border: I('u8', 93),
-      ext_encore_border: I('u8', 94),
-      ult_encore_border: I('u8', 95),
-      bsc_climax_border: I('u8', 95),
-      adv_climax_border: I('u8', 95),
-      ext_climax_border: I('u8', 95),
-      ult_climax_border: I('u8', 95),
-    },
-    v_bossdata: {
-      division: I('u8', 14),
-      border: A('u8', zeros(9)),
-      extra_border: I('u8', 90),
-      bsc_encore_border: I('u8', 92),
-      adv_encore_border: I('u8', 93),
-      ext_encore_border: I('u8', 94),
-      bsc_premium_border: I('u8', 95),
-      adv_premium_border: I('u8', 95),
-      ext_premium_border: I('u8', 95),
-    },
+    xg_bossdata: xgBossPayload(),
+    v_bossdata: vBossPayload(),
     plus: xg2PlusPayload(),
     trialdata: {
       trialid: I('s8', -1),
@@ -1105,32 +2444,11 @@ export const demodataGet: EPR = async (_info, _data, send) => {
   // K32/K33 reject a completely empty module before the title/demo state
   // manager is created.  Keep only the containers that the receiver parses
   // unconditionally and disable every advertised online/event feature.
+  const demo = demoConfiguration();
   await send.object({
     hitchart: K.ATTR({ nr: '0' }),
-    bossdata: {
-      division: I('u8', 0),
-      border: A('u8', zeros(10)),
-      extra_border: I('u8', 0),
-      bsc_encore_border: I('u8', 0),
-      adv_encore_border: I('u8', 0),
-      ext_encore_border: I('u8', 0),
-      ult_encore_border: I('u8', 0),
-      bsc_climax_border: I('u8', 0),
-      adv_climax_border: I('u8', 0),
-      ext_climax_border: I('u8', 0),
-      ult_climax_border: I('u8', 0),
-    },
-    v_bossdata: {
-      division: I('u8', 0),
-      border: A('u8', zeros(9)),
-      extra_border: I('u8', 0),
-      bsc_encore_border: I('u8', 0),
-      adv_encore_border: I('u8', 0),
-      ext_encore_border: I('u8', 0),
-      bsc_premium_border: I('u8', 0),
-      adv_premium_border: I('u8', 0),
-      ext_premium_border: I('u8', 0),
-    },
+    bossdata: xgBossPayload(),
+    v_bossdata: vBossPayload(),
     battle: { battle_play: I('u8', 0) },
     groupcompetition: groupCompetitionPayload(),
     is_valid_shopchamp_data: I('bool', shopChampionshipTerm() > 0),
@@ -1157,8 +2475,21 @@ export const demodataGet: EPR = async (_info, _data, send) => {
     trialdata: {
       trialid: I('s8', -1),
       state: I('u8', 0),
-      musicid: A('s32', negatives(5)),
-      grade_border: A('s32', zeros(15)),
+      // The disabled Trial container provides six parser-safe transport
+      // slots for the optional client Demo patch.  The original receiver
+      // always stores these values even when trialid is -1, while the event
+      // state remains disabled.
+      musicid: A('s32', [
+        demo.musicId,
+        demo.startMs,
+        demo.durationMs,
+        demo.startMs,
+        demo.durationMs,
+      ]),
+      grade_border: A(
+        's32',
+        [demo.sequenceMode].concat(zeros(14))
+      ),
     },
     plus: xg2PlusPayload(),
     infodata: {
@@ -1173,27 +2504,97 @@ export const demodataGet: EPR = async (_info, _data, send) => {
   });
 };
 
-export const cardutilCheck: EPR = async (_info, data, send) => {
+export const facilityGet: EPR = async (_info, _data, send) => {
+  await send.object({
+    location: {
+      id: I('str', 'ea'),
+      country: I('str', 'JP'),
+      region: I('str', 'JP-13'),
+      name: I('str', 'CORE'),
+      type: I('u8', 0),
+      countryname: I('str', 'UNKNOWN'),
+      countryjname: I('str', '涓嶆槑'),
+      regionname: I('str', 'CORE'),
+      regionjname: I('str', 'CORE'),
+      customercode: I('str', 'AXUSR'),
+      companycode: I('str', 'AXCPY'),
+      latitude: I('s32', 6666),
+      longitude: I('s32', 6666),
+      accuracy: I('u8', 0),
+    },
+    line: {
+      id: I('str', '.'),
+      class: I('u8', 0),
+    },
+    portfw: {
+      globalip: I('ip4', '127.0.0.1'),
+      globalport: I('u16', 5700),
+      privateport: I('u16', 5700),
+    },
+    public: {
+      flag: I('u8', 1),
+      name: I('str', 'UNKNOWN'),
+      latitude: I('str', '0'),
+      longitude: I('str', '0'),
+    },
+    share: {
+      eapass: {
+        valid: I(
+          'u16',
+          configInteger('eapass_valid_days', 365, 1, 999)
+        ),
+      },
+      eacoin: {
+        notchamount: I('s32', 0),
+        notchcount: I('s32', 0),
+        supplylimit: I('s32', 100000),
+      },
+      url: {
+        eapass: I('str', 'http://eagate.573.jp'),
+        arcadefan: I('str', 'CORE v1.60b'),
+        konaminetdx: I('str', 'http://am.573.jp'),
+        konamiid: I('str', 'CORE v1.60b'),
+        eagate: I('str', 'CORE v1.60b'),
+      },
+    },
+  });
+};
+
+export const cardutilCheck: EPR = async (info, data, send) => {
   const card = $(data).element('card');
   const refid = refidFrom(card.obj, 'refid');
   const profile = await findProfile(refid);
   const body: any = {};
   if (profile) {
+    const gameCode = requestGameCode(info);
+    const progress = await hydrateProfileProgress(refid, profile, gameCode, 0);
+    const technical = profileTechnicalStatus(profile, gameCode);
     // A successful card check begins a new play session.  K33 does not send a
-    // transaction id with gameend, so this server-side generation lets us
-    // recognize byte-identical network retries without suppressing a later
-    // legitimate play of the same song.
-    playSessions[refid] = nextPlaySession++;
-    delete gameendReceipts[refid];
+    // transaction id with gameend.  Persist the generation so a Core restart
+    // between the first response and a network retry cannot apply Live Point,
+    // play count, trophies, or scores twice.  The next card check advances the
+    // generation, so a later legitimate credit may still produce an identical
+    // gameend payload.
+    const state = ensureGameState(profile, gameCode);
+    const session = nextGameendSession(state.gameendSession);
+    state.gameendSession = session;
+    await DB.Update<Profile>(
+      refid,
+      { collection: 'profile' },
+      { $set: { games: profile.games } }
+    );
+    const sessionKey = gameendSessionKey(refid, gameCode);
+    playSessions[sessionKey] = session;
+    delete gameendReceipts[sessionKey];
     Object.assign(body, {
       name: I('str', profile.name),
-      emblem: A('u8', [profile.chara, 0, 0]),
+      emblem: A('u8', [profile.chara, technical.abilityType, technical.abilityLevel]),
       did: I('s32', profile.did || didFromRefid(refid)),
       groupid: I('s32', profile.groupId || 0),
-      xg_skill: I('s32', 0),
-      xg_all_skill: I('s32', 0),
-      v_skill: I('s32', 0),
-      v_all_skill: I('s32', 0),
+      xg_skill: I('s32', progress.skills.xgSkill),
+      xg_all_skill: I('s32', progress.skills.xgAllSkill),
+      v_skill: I('s32', progress.skills.vSkill),
+      v_all_skill: I('s32', progress.skills.vAllSkill),
       penalty: I('u8', 0),
     });
   }
@@ -1274,7 +2675,7 @@ function blankMusicRound(): any {
   );
 }
 
-function battleData(profile: Profile): any {
+function battleData(state: GameState): any {
   return {
     tag: I('u8', 0),
     bp: I('u32', 0),
@@ -1305,50 +2706,54 @@ function battleData(profile: Profile): any {
     area_win_list: A('u32', zeros(60)),
     area_lose_list: A('u32', zeros(60)),
     area_draw_list: A('u32', zeros(60)),
-    perfect: I('u32', profile.perfect),
-    great: I('u32', profile.great),
-    good: I('u32', profile.good),
-    poor: I('u32', profile.poor),
-    miss: I('u32', profile.miss),
+    perfect: I('u32', state.perfect),
+    great: I('u32', state.great),
+    good: I('u32', state.good),
+    poor: I('u32', state.poor),
+    miss: I('u32', state.miss),
     history: { round: Array(10).fill(0).map(blankBattleRound) },
     music_hist: { round: Array(20).fill(0).map(blankMusicRound) },
   };
 }
 
-function recentData(): any {
+function recentData(value?: XgRecentData): any {
+  const recent = normalizeXgRecentData(value);
   return {
-    clear_num: I('u32', 0),
-    full_clear_num: I('u32', 0),
-    exc_clear_num: I('u32', 0),
-    max_clear_difficulty: I('s32', 0),
-    max_fullcombo_clear_difficulty: I('s32', 0),
-    max_excellent_clear_difficulty: I('s32', 0),
-    max_s_clear_difficulty: I('s32', 0),
-    max_ss_clear_difficulty: I('s32', 0),
-    musicid: A('s32', negatives(20)),
-    maxcombo_rate: A('s8', zeros(20)),
-    perfect_rate: A('s8', zeros(20)),
-    miss_rate: A('s8', zeros(20)),
+    clear_num: I('u32', recent.clearNum),
+    full_clear_num: I('u32', recent.fullClearNum),
+    exc_clear_num: I('u32', recent.excellentClearNum),
+    max_clear_difficulty: I('s32', recent.maxClearDifficulty),
+    max_fullcombo_clear_difficulty: I('s32', recent.maxFullComboDifficulty),
+    max_excellent_clear_difficulty: I('s32', recent.maxExcellentDifficulty),
+    max_s_clear_difficulty: I('s32', recent.maxSClearDifficulty),
+    max_ss_clear_difficulty: I('s32', recent.maxSsClearDifficulty),
+    musicid: A('s32', recent.musicIds),
+    maxcombo_rate: A('s8', recent.maxComboRates),
+    perfect_rate: A('s8', recent.perfectRates),
+    miss_rate: A('s8', recent.missRates),
   };
 }
 
-function vRecentData(): any {
+function vRecentData(value?: VRecentData): any {
+  const recent = normalizeVRecentData(value);
   return {
-    clear_num: I('u32', 0),
-    full_clear_num: I('u32', 0),
-    exc_clear_num: I('u32', 0),
-    max_clear_difficulty: I('s8', 0),
-    max_fullcombo_difficulty: I('s8', 0),
-    max_excellent_difficulty: I('s8', 0),
-    recent: K.ATTR(
-      { musicid: '-1' },
-      {
-        difficulty: I('s8', 0),
-        combo_rate: I('s8', 0),
-        flags: I('u32', 0),
-        clear: I('s8', 0),
-        perfect_rate: I('s8', 0),
-      }
+    clear_num: I('u32', recent.clearNum),
+    full_clear_num: I('u32', recent.fullClearNum),
+    exc_clear_num: I('u32', recent.excellentClearNum),
+    max_clear_difficulty: I('s8', recent.maxClearDifficulty),
+    max_fullcombo_difficulty: I('s8', recent.maxFullComboDifficulty),
+    max_excellent_difficulty: I('s8', recent.maxExcellentDifficulty),
+    recent: recent.musicIds.map((musicId, index) =>
+      K.ATTR(
+        { musicid: String(musicId) },
+        {
+          difficulty: I('s8', recent.difficulty[index]),
+          combo_rate: I('s8', recent.comboRates[index]),
+          flags: I('u32', recent.flags[index]),
+          clear: I('s8', recent.clear[index]),
+          perfect_rate: I('s8', recent.perfectRates[index]),
+        }
+      )
     ),
   };
 }
@@ -1427,18 +2832,33 @@ export const gametopGet: EPR = async (info, data, send) => {
   const playerRequest = $(data).element('player');
   const refid = refidFrom(playerRequest.obj, 'refid');
   const profile = (await findProfile(refid)) || defaultProfile();
+  const collaboState = refid
+    ? await DB.FindOne<CollaboState>({ collection: 'collabo_state', refid })
+    : null;
   const requestElement = playerRequest.element('request');
   const requestedKind = requestElement
     ? requestElement.number('kind', 0)
     : 0;
   const gameCode = requestGameCode(info);
+  const state = gameStateOf(profile, gameCode);
+  const technical = profileTechnicalStatus(profile, gameCode);
   const scores = refid
     ? ((await DB.Find<Score>(refid, { collection: 'score' })) as Score[])
     : [];
+  const progress = await hydrateProfileProgress(
+    refid,
+    profile,
+    gameCode,
+    requestedKind,
+    scores
+  );
+  // The client's request kind selects its viewer page, not a record partition:
+  // EXTRA STAGE (kind=2) and CLIMAX STAGE (kind=4) plays of the same chart
+  // must still appear in the kind=0 records view, so every kind of this game
+  // merges into the response.
   const currentScores = scores.filter(score =>
     score.schemaVersion === SCORE_SCHEMA_VERSION &&
-    score.gameCode === gameCode &&
-    score.kind === requestedKind
+    score.gameCode === gameCode
   );
   const xgMusicdata = scoreMusicData(
     currentScores.filter(score => score.playMode === 'standard')
@@ -1455,21 +2875,47 @@ export const gametopGet: EPR = async (info, data, send) => {
     xg2PlusTerm() > 0 && xg2PlusUnlockPolicy() === 'original_progression';
   const unlockedPlusIds = originalPlusProgression
     ? XG2_PLUS_MUSIC.filter(
-        (_musicId, index) => profilePlusLivePoint(profile) >= XG2_PLUS_BORDERS[index]
+        (_musicId, index) => profilePlusLivePoint(state) >= XG2_PLUS_BORDERS[index]
       )
     : XG2_PLUS_MUSIC;
+  const masterPolicy = masterChartUnlockPolicy();
+  const playedSongIds = masterPolicy === 'played'
+    ? new Set(currentScores.map(score => score.musicId))
+    : null;
+  const masterGranted = (musicId: number): boolean =>
+    masterPolicy === 'all_unlocked' ||
+    (masterPolicy === 'played' && playedSongIds !== null && playedSongIds.has(musicId));
+  // The secret-music table is also the carrier for per-song chart grants:
+  // game.dll sub_101239D0 treats every entry as an unlocked-chart mask, and
+  // bit4 (0x10) is the MASTER chart.  Grants cover both the archived SECRET
+  // MUSIC catalog and the MASTER-capable songs from the local music database.
   const secretMusic: Array<[number, number]> = (originalPlusProgression
     ? XG_SECRET_MUSIC.filter(
         value => !XG2_PLUS_MUSIC.includes(value[0]) || unlockedPlusIds.includes(value[0])
       )
     : XG_SECRET_MUSIC).filter(
       value => appendFestivalMode() !== 'off' || value[0] !== 1843
-    ).map(value =>
-      value[0] === X_PLAN_MUSIC_ID &&
-      profile.communityTutorialRewardVersion >= COMMUNITY_TUTORIAL_REWARD_VERSION
-        ? [value[0], value[1] | X_PLAN_TUTORIAL_UNLOCK_MASK] as [number, number]
-        : value
-    );
+    ).map(value => {
+      let sequenceMask = archivedXgSecretSequenceMask(value[1]);
+      if (
+        value[0] === X_PLAN_MUSIC_ID &&
+        profile.communityTutorialRewardVersion >= COMMUNITY_TUTORIAL_REWARD_VERSION
+      ) {
+        sequenceMask |= X_PLAN_TUTORIAL_UNLOCK_MASK;
+      }
+      if (masterGranted(value[0])) {
+        sequenceMask |= XG_CHART_TIER_FULL_MASK;
+      }
+      return [value[0], sequenceMask] as [number, number];
+    });
+  if (masterPolicy !== 'off') {
+    const presentIds = new Set(secretMusic.map(value => value[0]));
+    for (const musicId of MASTER_CHART_MUSIC[gameCode] || MASTER_CHART_MUSIC.K33) {
+      if (secretMusic.length >= 155) break;
+      if (presentIds.has(musicId) || !masterGranted(musicId)) continue;
+      secretMusic.push([musicId, XG_CHART_TIER_FULL_MASK]);
+    }
+  }
   const secretIds = secretMusic.map(value => value[0]).concat(
     negatives(155 - secretMusic.length)
   );
@@ -1477,10 +2923,10 @@ export const gametopGet: EPR = async (info, data, send) => {
     zeros(155 - secretMusic.length)
   );
   const xgPlaystyle = normalizeNumbers(
-    profile.xgPlaystyle,
+    state.xgPlaystyle,
     XG_PLAYSTYLE_COUNT
   );
-  const vSecretSum = profile.secretMusic.reduce(
+  const vSecretSum = state.secretMusic.reduce(
     (sum, value) => sum + Math.max(0, value || 0),
     0
   );
@@ -1493,15 +2939,15 @@ export const gametopGet: EPR = async (info, data, send) => {
   const player = {
     player_type: I('u8', 0),
     name: I('str', profile.name),
-    emblem: A('u8', [profile.chara, 0, 0]),
-    xg_skill: I('s32', 0),
-    xg_all_skill: I('s32', 0),
-    v_skill: I('s32', 0),
-    v_all_skill: I('s32', 0),
-    live_point: I('s32', profile.livePoint),
-    plus_live_point: I('s32', profilePlusLivePoint(profile)),
+    emblem: A('u8', [profile.chara, technical.abilityType, technical.abilityLevel]),
+    xg_skill: I('s32', progress.skills.xgSkill),
+    xg_all_skill: I('s32', progress.skills.xgAllSkill),
+    v_skill: I('s32', progress.skills.vSkill),
+    v_all_skill: I('s32', progress.skills.vAllSkill),
+    live_point: I('s32', state.livePoint),
+    plus_live_point: I('s32', profilePlusLivePoint(state)),
     my_rival_id: I('str', '0'),
-    play_cnt: I('u32', profile.playCount),
+    play_cnt: I('u32', state.playCount),
     mode: I('u8', profile.lastMode),
     xg_favorite_music: A('s32', negatives(20)),
     xg_favorite_music_2: A('s32', negatives(20)),
@@ -1511,33 +2957,33 @@ export const gametopGet: EPR = async (info, data, send) => {
     v_favorite_music: A('s32', negatives(20)),
     v_favorite_music_2: A('s32', negatives(20)),
     v_favorite_music_3: A('s32', negatives(20)),
-    v_secret_music: A('u16', profile.secretMusic),
+    v_secret_music: A('u16', state.secretMusic),
     xg_playstyle: A('s32', xgPlaystyle),
-    info_level: I('u8', profile.infoLevel),
-    trophy_list: A('s32', negatives(19)),
+    info_level: I('u8', state.infoLevel),
+    trophy_list: A('s32', progress.trophyList),
     rival_id_1: I('str', ''),
     rival_id_2: I('str', ''),
     rival_id_3: I('str', ''),
     mtime: I('str', protocolTime()),
     group_withdrawal_state: I('s32', 0),
-    item: A('s32', zeros(48)),
+    item: A('s32', normalizeCustomItems(state.customItems)),
     myshop: {
       locationid: I('str', shop ? shop.locationId : ''),
       shopname: I('str', shop ? shop.name : ''),
     },
     jubeat_collabo: {
-      gfdm_j: I('bool', false),
-      j_gfdm: I('bool', false),
-      save_state: I('s32', 0),
+      gfdm_j: I('bool', Boolean(collaboState && collaboState.gfdmRegistered)),
+      j_gfdm: I('bool', Boolean(collaboState && collaboState.jubeatConfirmed)),
+      save_state: I('s32', Number(collaboState ? collaboState.saveState || 0 : 0)),
     },
     syogo_list: A('s16', negatives(200)),
     badge_list: A('s16', negatives(200)),
     favorite_music: A('s16', negatives(20)),
     favorite_music_2: A('s16', negatives(20)),
     favorite_music_3: A('s16', negatives(20)),
-    secret_music: A('u16', profile.secretMusic),
-    style: I('u32', profile.style),
-    style_2: I('u32', profile.style2),
+    secret_music: A('u16', state.secretMusic),
+    style: I('u32', state.style),
+    style_2: I('u32', state.style2),
     shutter_list: I('u32', 0),
     judge_logo_list: I('u32', 0),
     skin_list: I('u32', 0),
@@ -1546,7 +2992,7 @@ export const gametopGet: EPR = async (info, data, send) => {
     idle_screen: I('u32', 0),
     chance_point: I('s32', 0),
     failed_cnt: I('s32', 0),
-    secret_chara: I('u32', profile.secretChara),
+    secret_chara: I('u32', state.secretChara),
     mode_beginner: I('u16', 0),
     mode_standard: I('u16', 0),
     mode_battle_global: I('u16', 0),
@@ -1556,22 +3002,22 @@ export const gametopGet: EPR = async (info, data, send) => {
     v4_skill: I('s32', -1),
     old_ver_skill: I('s32', -1),
     customize: {
-      shutter: I('u8', profile.shutter),
-      info_level: I('u8', profile.infoLevel),
-      name_disp: I('u8', profile.nameDisp),
-      auto: I('u8', profile.auto),
-      random: I('u8', profile.random),
-      judge_logo: I('u32', profile.judgeLogo),
-      skin: I('u32', profile.skin),
-      movie: I('u32', profile.movie),
-      attack_effect: I('u32', profile.attackEffect),
-      layout: I('u8', profile.layout),
-      target_skill: I('u8', profile.targetSkill),
-      comparison: I('u8', profile.comparison),
-      meter_custom: A('u8', profile.meterCustom),
+      shutter: I('u8', state.shutter),
+      info_level: I('u8', state.infoLevel),
+      name_disp: I('u8', state.nameDisp),
+      auto: I('u8', state.auto),
+      random: I('u8', state.random),
+      judge_logo: I('u32', state.judgeLogo),
+      skin: I('u32', state.skin),
+      movie: I('u32', state.movie),
+      attack_effect: I('u32', state.attackEffect),
+      layout: I('u8', state.layout),
+      target_skill: I('u8', state.targetSkill),
+      comparison: I('u8', state.comparison),
+      meter_custom: A('u8', state.meterCustom),
     },
     tag: I('u8', tag),
-    battledata: battleData(profile),
+    battledata: battleData(state),
     battle_aniv: {
       get: {
         category_ver: A('u16', zeros(11)),
@@ -1579,39 +3025,39 @@ export const gametopGet: EPR = async (info, data, send) => {
       },
     },
     info: {
-      mode: I('u32', profile.infoState.mode),
-      boss: I('u32', profile.infoState.boss),
-      add_music: I('u32', profile.infoState.addMusic),
-      free_music: I('u32', profile.infoState.freeMusic),
-      free_seq: I('u32', profile.infoState.freeSeq),
-      indies: I('u32', profile.infoState.indies),
-      jukebox: I('u32', profile.infoState.jukebox),
-      trial: I('u32', profile.infoState.trial),
-      topranker: I('u32', profile.infoState.topRanker),
-      log: I('u32', profile.infoState.log),
+      mode: I('u32', state.infoState.mode),
+      boss: I('u32', state.infoState.boss),
+      add_music: I('u32', state.infoState.addMusic),
+      free_music: I('u32', state.infoState.freeMusic),
+      free_seq: I('u32', state.infoState.freeSeq),
+      indies: I('u32', state.infoState.indies),
+      jukebox: I('u32', state.infoState.jukebox),
+      trial: I('u32', state.infoState.trial),
+      topranker: I('u32', state.infoState.topRanker),
+      log: I('u32', state.infoState.log),
       coope_challenge: I(
         'u32',
         cooperationChallengeEnabled()
           ? profile.groupId
-            ? Math.max(1, profile.infoState.coopeChallenge)
-            : profile.infoState.coopeChallenge
+            ? Math.max(1, state.infoState.coopeChallenge)
+            : state.infoState.coopeChallenge
           : 0
       ),
-      custom_challenge: I('u32', profile.infoState.customChallenge),
-      group_compe: I('u32', profile.infoState.groupCompe),
-      group_trial: I('u32', profile.infoState.groupTrial),
-      group: I('u32', profile.infoState.group),
-      shopchamp: I('u32', profile.infoState.shopChamp),
-      group_lv: I('u32', profile.infoState.groupLevel),
-      live_point: I('u32', profile.infoState.livePoint),
-      texture: I('u32', profile.infoState.texture),
+      custom_challenge: I('u32', state.infoState.customChallenge),
+      group_compe: I('u32', state.infoState.groupCompe),
+      group_trial: I('u32', state.infoState.groupTrial),
+      group: I('u32', state.infoState.group),
+      shopchamp: I('u32', state.infoState.shopChamp),
+      group_lv: I('u32', state.infoState.groupLevel),
+      live_point: I('u32', state.livePoint),
+      texture: I('u32', state.infoState.texture),
       groupmember_recruitment: I(
         'u32',
-        profile.infoState.groupmemberRecruitment
+        state.infoState.groupmemberRecruitment
       ),
     },
-    xg_recentdata: recentData(),
-    v_recentdata: vRecentData(),
+    xg_recentdata: recentData(technical.xgRecent),
+    v_recentdata: vRecentData(technical.vRecent),
     quest: {
       quest_rank: I('u8', 0),
       star: I('u32', 0),
@@ -1657,32 +3103,51 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
   const playerInfoElement = player.element('playerinfo');
   const playerInfo = $(playerInfoElement ? playerInfoElement.obj : {});
   const refid = refidFrom(playerInfo.obj, 'refid');
+  const gameCode = requestGameCode(requestInfo);
   const existing = (refid ? await findProfile(refid) : null) || defaultProfile();
+  // GF (K33) and DM (K32) are separate saves: every profile-level gameend
+  // field, receipt and play count belongs to the requesting game's state.
+  const state = ensureGameState(existing, gameCode);
   const requestTime = Date.now();
-  const requestFingerprint = JSON.stringify(data);
-  const playSession = refid ? playSessions[refid] || 0 : 0;
-  const previousReceipt = refid ? gameendReceipts[refid] : undefined;
+  const requestFingerprint = compactRequestFingerprint(data);
+  const sessionKey = gameendSessionKey(refid, gameCode);
+  const playSession = refid
+    ? playSessions[sessionKey] || clampS32(state.gameendSession)
+    : 0;
+  const previousReceipt = refid
+    ? gameendReceipts[sessionKey] || state.lastGameendReceipt
+    : undefined;
   const isDuplicate = !!(
     previousReceipt &&
     previousReceipt.session === playSession &&
-    previousReceipt.fingerprint === requestFingerprint &&
-    requestTime - previousReceipt.processedAt < 15000
+    previousReceipt.fingerprint === requestFingerprint
   );
   const responsePlayCount = isDuplicate
     ? previousReceipt!.playCount
-    : existing.playCount + 1;
+    : state.playCount + 1;
   const responseNowTime = isDuplicate
     ? previousReceipt!.nowTime
     : new Date(requestTime).toISOString();
   const customizeElement = playerInfo.element('customize');
   const customize = $(customizeElement ? customizeElement.obj : {});
+  const incomingCustomItems = playerInfo.numbers('item', []);
+  const savedCustomItems = mergeCustomItems(state.customItems, incomingCustomItems);
   const playstyles = playerInfo.numbers('playstyles', []);
   const infoElement = playerInfo.element('info');
   const info = $(infoElement ? infoElement.obj : {});
   const playMode = requestPlayMode(data);
-  const gameCode = requestGameCode(requestInfo);
   const stages = $(data).elements('modedata.stage');
   const results = player.elements('playdata');
+  const responseKind = results.length > 0 ? results[0].number('kind', 0) : 0;
+  const incomingEmblem = playerInfo.numbers('emblem', []);
+  const previousTechnical = profileTechnicalStatus(existing, gameCode);
+  const savedTechnical = isDuplicate
+    ? previousTechnical
+    : uploadedTechnicalStatus(playerInfo, previousTechnical);
+  const savedTechnicalStatus = {
+    ...(existing.technicalStatus || {}),
+    [technicalStatusKey(gameCode)]: savedTechnical,
+  };
   const groupDataRaw = (playerInfo.obj as any).groupdata;
   const groupData = $(groupDataRaw || {});
   const pdataRaw = groupDataRaw && groupDataRaw.pdata;
@@ -1747,61 +3212,76 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
   const uploadedLogNum = pdata.number('log_num', existing.communityLogNum);
   const incomingLivePoint = Math.max(
     0,
-    playerInfo.number('live_point', existing.livePoint)
+    playerInfo.number('live_point', state.livePoint)
   );
+  const earnedLivePoint = Math.max(0, playerInfo.number('get_live_point', 0));
+  // Real K33 captures show that live_point normally already includes this
+  // credit's get_live_point award (403 + 2200 -> 2603, 2603 + 300 -> 2903,
+  // 2903 + 1200 -> 4103).  Do not blindly add both fields.  When a cabinet
+  // uploads a stale/base live_point, existing + get_live_point is a safe
+  // fallback; taking the maximum supports both forms without regression.
+  const savedLivePoint = isDuplicate
+    ? state.livePoint
+    : clampS32(
+        incomingLivePoint >= state.livePoint
+          ? incomingLivePoint
+          : Math.max(state.livePoint, state.livePoint + earnedLivePoint)
+      );
+  const incomingTrophyList = playerInfo.numbers('trophy_list', []);
+  const savedTrophyList = mergeTrophyList(state.trophyList, incomingTrophyList);
   const plusLimit = xg2PlusLimit();
   const incomingPlusLivePoint = playerInfo.number(
     'plus_live_point',
-    existing.plusLivePoint
+    state.plusLivePoint
   );
   const savedPlusLivePoint = plusLimit < 0
-    ? existing.plusLivePoint
+    ? state.plusLivePoint
     : xg2PlusUnlockPolicy() === 'all_unlocked'
       ? plusLimit
       : Math.max(
-          existing.plusLivePoint,
+          state.plusLivePoint,
           Math.max(0, Math.min(plusLimit, incomingPlusLivePoint))
         );
   const infoState: PlayerInfoState = {
-    mode: info.number('mode', existing.infoState.mode),
-    boss: info.number('boss', existing.infoState.boss),
-    addMusic: info.number('add_music', existing.infoState.addMusic),
-    freeMusic: info.number('free_music', existing.infoState.freeMusic),
-    freeSeq: info.number('free_seq', existing.infoState.freeSeq),
-    indies: info.number('indies', existing.infoState.indies),
-    jukebox: info.number('jukebox', existing.infoState.jukebox),
-    trial: info.number('trial', existing.infoState.trial),
-    topRanker: info.number('topranker', existing.infoState.topRanker),
+    mode: info.number('mode', state.infoState.mode),
+    boss: info.number('boss', state.infoState.boss),
+    addMusic: info.number('add_music', state.infoState.addMusic),
+    freeMusic: info.number('free_music', state.infoState.freeMusic),
+    freeSeq: info.number('free_seq', state.infoState.freeSeq),
+    indies: info.number('indies', state.infoState.indies),
+    jukebox: info.number('jukebox', state.infoState.jukebox),
+    trial: info.number('trial', state.infoState.trial),
+    topRanker: info.number('topranker', state.infoState.topRanker),
     // The Community Log introduction is one-shot state.  Older cabinets can
     // upload a stale zero after it has completed, which must not replay the
     // tutorial or revoke its X-Plan reward.
-    log: Math.max(existing.infoState.log, info.number('log', existing.infoState.log)),
+    log: Math.max(state.infoState.log, info.number('log', state.infoState.log)),
     coopeChallenge: cooperationChallengeEnabled()
       ? existing.groupId
-        ? Math.max(1, info.number('coope_challenge', existing.infoState.coopeChallenge))
-        : info.number('coope_challenge', existing.infoState.coopeChallenge)
+        ? Math.max(1, info.number('coope_challenge', state.infoState.coopeChallenge))
+        : info.number('coope_challenge', state.infoState.coopeChallenge)
       : 0,
     customChallenge: info.number(
       'custom_challenge',
-      existing.infoState.customChallenge
+      state.infoState.customChallenge
     ),
-    groupCompe: info.number('group_compe', existing.infoState.groupCompe),
-    groupTrial: info.number('group_trial', existing.infoState.groupTrial),
-    group: info.number('group', existing.infoState.group),
-    shopChamp: info.number('shopchamp', existing.infoState.shopChamp),
-    groupLevel: info.number('group_lv', existing.infoState.groupLevel),
-    livePoint: info.number('live_point', existing.infoState.livePoint),
-    texture: info.number('texture', existing.infoState.texture),
+    groupCompe: info.number('group_compe', state.infoState.groupCompe),
+    groupTrial: info.number('group_trial', state.infoState.groupTrial),
+    group: info.number('group', state.infoState.group),
+    shopChamp: info.number('shopchamp', state.infoState.shopChamp),
+    groupLevel: info.number('group_lv', state.infoState.groupLevel),
+    livePoint: savedLivePoint,
+    texture: info.number('texture', state.infoState.texture),
     groupmemberRecruitment: info.number(
       'groupmember_recruitment',
-      existing.infoState.groupmemberRecruitment
+      state.infoState.groupmemberRecruitment
     ),
   };
   const savedPlaystyle = playstyles.length > 0
     ? normalizeNumbers(playstyles, XG_PLAYSTYLE_COUNT)
-    : normalizeNumbers(existing.xgPlaystyle, XG_PLAYSTYLE_COUNT);
+    : normalizeNumbers(state.xgPlaystyle, XG_PLAYSTYLE_COUNT);
   savedPlaystyle[16] = Math.max(
-    existing.xgPlaystyle[16] || 0,
+    state.xgPlaystyle[16] || 0,
     savedPlaystyle[16] || 0
   );
 
@@ -1871,11 +3351,61 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
       );
     }
   }
+  const updatedState: GameState = {
+    ...state,
+    playCount: state.playCount + 1,
+    livePoint: savedLivePoint,
+    plusLivePoint: savedPlusLivePoint,
+    trophyList: savedTrophyList,
+    customItems: savedCustomItems,
+    xgPlaystyle: savedPlaystyle,
+    infoState,
+    style: playerInfo.number('styles', playerInfo.number('style', state.style)),
+    style2: playerInfo.number(
+      'styles_2',
+      playerInfo.number('style_2', state.style2)
+    ),
+    secretMusic: playerInfo.numbers(
+      'v_secret_music',
+      playerInfo.numbers('secret_music', state.secretMusic)
+    ),
+    secretChara: playerInfo.number('secret_chara', state.secretChara),
+    syogo: playerInfo.numbers('syogo', state.syogo),
+    perfect: playerInfo.number('perfect', state.perfect),
+    great: playerInfo.number('great', state.great),
+    good: playerInfo.number('good', state.good),
+    poor: playerInfo.number('poor', state.poor),
+    miss: playerInfo.number('miss', state.miss),
+    shutter: customize.number('shutter', state.shutter),
+    infoLevel: playerInfo.number(
+      'info_level',
+      customize.number('info_level', state.infoLevel)
+    ),
+    nameDisp: customize.number('name_disp', state.nameDisp),
+    auto: customize.number('auto', state.auto),
+    random: customize.number('random', state.random),
+    judgeLogo: customize.number('judge_logo', state.judgeLogo),
+    skin: customize.number('skin', state.skin),
+    movie: customize.number('movie', state.movie),
+    attackEffect: customize.number('attack_effect', state.attackEffect),
+    layout: customize.number('layout', state.layout),
+    targetSkill: customize.number('target_skill', state.targetSkill),
+    comparison: customize.number('comparison', state.comparison),
+    meterCustom: customize.numbers('meter_custom', state.meterCustom),
+    gameendSession: playSession,
+    lastGameendReceipt: isDuplicate
+      ? state.lastGameendReceipt
+      : {
+          session: playSession,
+          fingerprint: requestFingerprint,
+          processedAt: requestTime,
+          playCount: responsePlayCount,
+          nowTime: responseNowTime,
+        },
+  };
   const update: Partial<Profile> = {
     lastMode: modeNumber(playMode, existing.lastMode),
     modeEncodingVersion: 2,
-    xgPlaystyle: savedPlaystyle,
-    infoState,
     communityIcon: pdata.number('icon', existing.communityIcon),
     communityIconBack: pdata.number('icon_back', existing.communityIconBack),
     // log_num is an identity high-water mark, not a disposable UI value.  A
@@ -1896,46 +3426,29 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
     communityEventLogs: mergedEventLogs,
     communitySchemaVersion: COMMUNITY_SCHEMA_VERSION,
     communityTutorialRewardVersion,
-    livePoint: Math.max(existing.livePoint, incomingLivePoint),
-    plusLivePoint: savedPlusLivePoint,
-    style: playerInfo.number('styles', playerInfo.number('style', existing.style)),
-    style2: playerInfo.number(
-      'styles_2',
-      playerInfo.number('style_2', existing.style2)
-    ),
-    secretMusic: playerInfo.numbers(
-      'v_secret_music',
-      playerInfo.numbers('secret_music', existing.secretMusic)
-    ),
-    secretChara: playerInfo.number('secret_chara', existing.secretChara),
-    syogo: playerInfo.numbers('syogo', existing.syogo),
-    perfect: playerInfo.number('perfect', existing.perfect),
-    great: playerInfo.number('great', existing.great),
-    good: playerInfo.number('good', existing.good),
-    poor: playerInfo.number('poor', existing.poor),
-    miss: playerInfo.number('miss', existing.miss),
-    shutter: customize.number('shutter', existing.shutter),
-    infoLevel: playerInfo.number(
-      'info_level',
-      customize.number('info_level', existing.infoLevel)
-    ),
-    nameDisp: customize.number('name_disp', existing.nameDisp),
-    auto: customize.number('auto', existing.auto),
-    random: customize.number('random', existing.random),
-    judgeLogo: customize.number('judge_logo', existing.judgeLogo),
-    skin: customize.number('skin', existing.skin),
-    movie: customize.number('movie', existing.movie),
-    attackEffect: customize.number('attack_effect', existing.attackEffect),
-    layout: customize.number('layout', existing.layout),
-    targetSkill: customize.number('target_skill', existing.targetSkill),
-    comparison: customize.number('comparison', existing.comparison),
-    meterCustom: customize.numbers('meter_custom', existing.meterCustom),
+    technicalStatus: savedTechnicalStatus,
+    chara: incomingEmblem.length > 0
+      ? clampInteger(incomingEmblem[0], 0, 0xff)
+      : existing.chara,
+    games: { ...existing.games, [gameCode]: updatedState },
   };
   if (refid && !isDuplicate) {
+    const shopTrialResult = (playerInfo.obj as any).shoptrial;
+    if (shopTrialResult) {
+      // The real cabinet submits Shop Trial scores inside gameend/playerinfo.
+      // The outer is_trial_play/is_shopchamp_play flags and the nested result
+      // flag stay false in captured valid submissions, so is_valid plus the
+      // complete keyed result is the only reliable persistence gate.
+      await upsertShopTrialEntry(shopTrialResult, {
+        refid,
+        profile: existing,
+        requireValid: true,
+      });
+    }
     await DB.Upsert<Profile>(
       refid,
       { collection: 'profile' },
-      { $set: update, $inc: { playCount: 1 } }
+      { $set: update }
     );
     if (existing.groupId) {
       const group = await findGroup(existing.groupId);
@@ -2056,52 +3569,43 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
     }
   }
 
+  const savedScores = refid
+    ? ((await DB.Find<Score>(refid, { collection: 'score' })) as Score[])
+    : [];
+  const responseProfile = {
+    ...existing,
+    ...update,
+  } as Profile;
+  const progress = await hydrateProfileProgress(
+    refid,
+    responseProfile,
+    gameCode,
+    responseKind,
+    savedScores
+  );
+
   if (refid && !isDuplicate) {
-    gameendReceipts[refid] = {
-      session: playSession,
-      fingerprint: requestFingerprint,
-      processedAt: requestTime,
-      playCount: responsePlayCount,
-      nowTime: responseNowTime,
-    };
+    gameendReceipts[sessionKey] = updatedState.lastGameendReceipt!;
   }
 
   const mode = $(data).attr('gamemode').mode || '0';
-  const responseEmblem = playerInfo
-    .numbers('emblem', [existing.chara, 0, 0])
-    .slice(0, 3);
-  while (responseEmblem.length < 3) responseEmblem.push(0);
+  const responseEmblem = [
+    update.chara === undefined ? existing.chara : update.chara,
+    savedTechnical.abilityType,
+    savedTechnical.abilityLevel,
+  ];
   const responsePlayer: any = {
     event_mode: I('u8', 0),
-    trophy_list: A('s32', negatives(19)),
+    trophy_list: A('s32', progress.trophyList),
     emblem: A('u8', responseEmblem),
-    xg_item: A('s32', zeros(48)),
-    live_point: I('s32', Math.max(existing.livePoint, incomingLivePoint)),
+    xg_item: A('s32', LIVE_POINT_REWARD_CATALOG),
+    live_point: I('s32', savedLivePoint),
     plus_live_point: I('s32', plusLimit < 0 ? -1 : savedPlusLivePoint),
-    xg_skill: {
-      point: I('s32', 0),
-      rank: I('u32', 1),
-      total_nr: I('u32', 1),
-      all_point: I('s32', 0),
-      all_rank: I('u32', 1),
-      all_total_nr: I('u32', 1),
-    },
-    v_skill: {
-      point: I('s32', 0),
-      rank: I('u32', 1),
-      total_nr: I('u32', 1),
-      all_point: I('s32', 0),
-      all_rank: I('u32', 1),
-      all_total_nr: I('u32', 1),
-    },
-    skill: {
-      point: I('s32', 0),
-      rank: I('u32', 1),
-      total_nr: I('u32', 1),
-      all_point: I('s32', 0),
-      all_rank: I('u32', 1),
-      all_total_nr: I('u32', 1),
-    },
+    xg_skill: skillResponse(progress.skills.xgSkill, progress.skills.xgAllSkill),
+    v_skill: skillResponse(progress.skills.vSkill, progress.skills.vAllSkill),
+    skill: playMode === 'classic'
+      ? skillResponse(progress.skills.vSkill, progress.skills.vAllSkill)
+      : skillResponse(progress.skills.xgSkill, progress.skills.xgAllSkill),
     registered_other_num: I('u32', 0),
     xg_play_cnt: I('u32', responsePlayCount),
     play_cnt: I('u32', responsePlayCount),
@@ -2113,15 +3617,15 @@ export const gameendRegist: EPR = async (requestInfo, data, send) => {
     vip_rensyo: I('u16', 0),
     all_play_mode: I('u8', 0),
     play_shop_num: I('u8', 0),
-    judge_perfect: I('u32', update.perfect || 0),
+    judge_perfect: I('u32', updatedState.perfect || 0),
     is_v5_goodplayer: I('u8', 0),
     max_clear_difficulty: I('s8', 0),
     max_fullcombo_difficulty: I('s8', 0),
     max_excellent_difficulty: I('s8', 0),
     rival_data: {},
-    battledata: battleData({ ...existing, ...update } as Profile),
-    xg_recentdata: recentData(),
-    v_recentdata: vRecentData(),
+    battledata: battleData(updatedState),
+    xg_recentdata: recentData(savedTechnical.xgRecent),
+    v_recentdata: vRecentData(savedTechnical.vRecent),
     quest: {
       quest_rank: I('u8', 0),
       star: I('u32', 0),
@@ -2210,13 +3714,21 @@ const customChallengeNode = (index: number) =>
     }
   );
 
-const basicGroupMemberNode = (profile: Profile | null, refid = '') =>
+const basicGroupMemberNode = (
+  profile: Profile | null,
+  refid = '',
+  gameCode = 'K33',
+  skill = 0
+) =>
   K.ATTR(
     { did: String((profile && profile.did) || (refid ? didFromRefid(refid) : 0)) },
     {
       name: I('str', profile ? profile.name : ''),
-      skill: I('s32', 0),
-      emblem: A('u8', [profile ? profile.chara : 0, 0, 0]),
+      // Group/Community uses this single Skill value to select the colour of
+      // the Ability emblem.  Returning zero leaves the right animal/level in
+      // the wrong colour band.
+      skill: I('s32', skill),
+      emblem: A('u8', profileEmblem(profile, gameCode)),
       icon: I('s32', profile ? profile.communityIcon : 0),
       icon_back: I('s32', profile ? profile.communityIconBack : 0),
       mtime: I('str', protocolTime()),
@@ -2226,15 +3738,16 @@ const basicGroupMemberNode = (profile: Profile | null, refid = '') =>
 const fullGroupMemberNode = (
   profile: Profile | null,
   refid = '',
-  gameCode = 'K33'
+  gameCode = 'K33',
+  skill = 0
 ) =>
   K.ATTR(
     { did: String((profile && profile.did) || (refid ? didFromRefid(refid) : 0)) },
     {
       name: I('str', profile ? profile.name : ''),
-      skill: I('s32', 0),
-      live_point: I('s32', profile ? profile.livePoint : 0),
-      emblem: A('u8', [profile ? profile.chara : 0, 0, 0]),
+      skill: I('s32', skill),
+      live_point: I('s32', profile ? profileTotalLivePoint(profile) : 0),
+      emblem: A('u8', profileEmblem(profile, gameCode)),
       icon: I('s32', profile ? profile.communityIcon : 0),
       icon_back: I('s32', profile ? profile.communityIconBack : 0),
       log_num: I('s32', profile ? profile.communityLogNum : 0),
@@ -2267,20 +3780,26 @@ async function groupMembers(
   gameCode = 'K33'
 ): Promise<any[]> {
   const nodes: any[] = [];
-  const render = full ? fullGroupMemberNode : basicGroupMemberNode;
   for (const refid of group.memberRefids.slice(0, 10)) {
+    const profile = await findProfile(refid);
+    const progress = profile
+      ? await hydrateProfileProgress(refid, profile, gameCode, 0)
+      : null;
+    const skill = progress ? progress.skills.xgSkill : 0;
     nodes.push(full
-      ? fullGroupMemberNode(await findProfile(refid), refid, gameCode)
-      : basicGroupMemberNode(await findProfile(refid), refid));
+      ? fullGroupMemberNode(profile, refid, gameCode, skill)
+      : basicGroupMemberNode(profile, refid, gameCode, skill));
   }
   while (nodes.length < 10) {
-    nodes.push(full ? fullGroupMemberNode(null, '', gameCode) : render(null));
+    nodes.push(full
+      ? fullGroupMemberNode(null, '', gameCode)
+      : basicGroupMemberNode(null, '', gameCode));
   }
   return nodes;
 }
 
-async function renderGroupSummary(group: Group): Promise<any> {
-  const members = await groupMembers(group);
+async function renderGroupSummary(group: Group, gameCode = 'K33'): Promise<any> {
+  const members = await groupMembers(group, false, gameCode);
   const memberDids = group.memberRefids
     .slice(0, 10)
     .map(didFromRefid)
@@ -2346,14 +3865,20 @@ function rootCooperationNodes(group: Group | null, gameCode: string): any[] {
   const saved = (group.cooperationScores || []).filter(value =>
     value.gameCode === gameCode
   );
+  const goals = COOPERATION_GOALS[gameCode] || COOPERATION_GOALS.K33;
+  const completed = cooperationChallengeEnabled() && cooperationCompletionArchived();
   // Once group_coope is present the game no longer falls back to its local
   // table, so return the complete 26-entry catalog in the original XML order.
   return cooperationEventIds(gameCode).map(eventId => {
     const state = saved.find(value => value.eventId === eventId);
+    const goal = goals[eventId] || 0;
+    const totalScore = completed && goal > 0
+      ? Math.max(clampU32(state ? state.totalScore : 0), goal)
+      : clampU32(state ? state.totalScore : 0);
     return K.ATTR(
       { eventid: String(eventId) },
       {
-        total_score: I('u32', state ? clampU32(state.totalScore) : 0),
+        total_score: I('u32', totalScore),
         valid_time: I(
           'str',
           state && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(state.validTime)
@@ -2369,6 +3894,7 @@ async function renderGroupData(
   group: Group | null,
   gameCode = 'K33'
 ): Promise<any> {
+  const prizeRestoration = groupPrizeRestorationState(group, gameCode);
   const memberRefids = group ? group.memberRefids : [];
   const members = group
     ? await groupMembers(group, true, gameCode)
@@ -2384,7 +3910,7 @@ async function renderGroupData(
       name: I('str', group ? group.name : ''),
       member_did: A('s32', memberDids),
       member_nr: I('s32', Math.min(memberRefids.length, 10)),
-      group_level: I('s32', group ? groupLevel(group.livePoint || 0) : 0),
+      group_level: I('s32', prizeRestoration.groupLevel),
       live_point: I('s32', (group && group.livePoint) || 0),
       limit_live_point: I('s32', group && livePointTerm() > 0 ? 389999 : 0),
       lower_live_point: I('s32', 0),
@@ -2392,7 +3918,7 @@ async function renderGroupData(
       secret_music_seq: A('s32', zeros(5)),
       reward_music_id: A('s32', negatives(20)),
       reward_music_seq: A('s32', zeros(20)),
-      item: A('s32', zeros(26)),
+      item: A('s32', prizeRestoration.item),
       continue_live_point_bonus: I('s32', 0),
       is_recruitment: I('bool', group ? group.isRecruitment : false),
       p_group_log: {
@@ -2418,6 +3944,7 @@ async function renderGroupData(
 }
 
 async function findGroup(groupId: number): Promise<Group | null> {
+  await ensureSearchableGroupIds();
   if (groupId <= 0) return null;
   return (await DB.FindOne<Group>({ collection: 'group', groupId })) || null;
 }
@@ -2431,7 +3958,7 @@ async function recomputeGroupLivePoint(groupId: number): Promise<Group | null> {
   const livePoint = Math.min(
     389999,
     profiles.reduce(
-      (sum, profile) => sum + (profile ? Math.max(0, profile.livePoint || 0) : 0),
+      (sum, profile) => sum + (profile ? profileTotalLivePoint(profile) : 0),
       0
     )
   );
@@ -2498,6 +4025,7 @@ async function reconcileGroupCooperationScores(
 }
 
 async function detachFromOtherGroups(refid: string, keepGroupId = 0): Promise<void> {
+  await ensureSearchableGroupIds();
   const groups = await DB.Find<Group>({ collection: 'group' });
   for (const group of groups) {
     if (group.groupId === keepGroupId || !group.memberRefids.includes(refid)) continue;
@@ -2608,12 +4136,14 @@ export const groupDataRegist: EPR = async (_info, data, send) => {
   await send.object({ groupdata: { state: I('s32', group ? 0 : 1) } });
 };
 
-export const groupListGet: EPR = async (_info, _data, send) => {
+export const groupListGet: EPR = async (info, _data, send) => {
+  await ensureSearchableGroupIds();
+  const gameCode = requestGameCode(info);
   const stored = (await DB.Find<Group>({ collection: 'group' })).slice(0, 3);
   const output: any[] = [];
   for (const group of stored) {
     const refreshed = await recomputeGroupLivePoint(group.groupId);
-    output.push(await renderGroupSummary(refreshed || group));
+    output.push(await renderGroupSummary(refreshed || group, gameCode));
   }
   while (output.length < 3) {
     output.push(
@@ -2633,7 +4163,7 @@ export const groupListGet: EPR = async (_info, _data, send) => {
           reward_music_id: A('s32', negatives(20)),
           reward_music_seq: A('s32', zeros(20)),
           member: {
-            player: Array(10).fill(0).map(() => basicGroupMemberNode(null)),
+            player: Array(10).fill(0).map(() => basicGroupMemberNode(null, '', gameCode)),
           },
         }
       )
@@ -2642,19 +4172,20 @@ export const groupListGet: EPR = async (_info, _data, send) => {
   await send.object({ grouplist: { group: output } });
 };
 
-export const groupSearch: EPR = async (_info, data, send) => {
+export const groupSearch: EPR = async (info, data, send) => {
   const group = await findGroup(requestGroupId(data));
   const refreshed = group ? await recomputeGroupLivePoint(group.groupId) : null;
   const output = refreshed || group;
   await send.object({
     groupsearch: K.ATTR(
       { state: output ? '0' : '1' },
-      output ? { group: await renderGroupSummary(output) } : {}
+      output ? { group: await renderGroupSummary(output, requestGameCode(info)) } : {}
     ),
   });
 };
 
 export const groupCreate: EPR = async (info, data, send) => {
+  await ensureSearchableGroupIds();
   const request = $(data).element('group');
   const refid = requestRefid(data);
   const profile = refid ? await findProfile(refid) : null;
@@ -2667,7 +4198,17 @@ export const groupCreate: EPR = async (info, data, send) => {
   if (!group) {
     await detachFromOtherGroups(refid);
     const groups = await DB.Find<Group>({ collection: 'group' });
-    const groupId = groups.reduce((maximum, value) => Math.max(maximum, value.groupId), 0) + 1;
+    const usedGroupIds = new Set<number>(
+      groups.map(value => value.groupId).filter(isSearchableGroupId)
+    );
+    const highestGroupId = groups.reduce(
+      (maximum, value) =>
+        isSearchableGroupId(value.groupId)
+          ? Math.max(maximum, value.groupId)
+          : maximum,
+      GROUP_ID_MIN - 1
+    );
+    const groupId = availableGroupId(usedGroupIds, highestGroupId + 1);
     group = await DB.Insert<Group>({
       collection: 'group',
       groupId,
@@ -2690,16 +4231,18 @@ export const groupCreate: EPR = async (info, data, send) => {
     });
   }
   if (profile) {
+    const joinState = ensureGameState(profile, requestGameCode(info));
+    joinState.infoState = {
+      ...joinState.infoState,
+      coopeChallenge: cooperationChallengeEnabled() ? 1 : 0,
+    };
     await DB.Update<Profile>(
       refid,
       { collection: 'profile' },
       {
         $set: {
           groupId: group.groupId,
-          infoState: {
-            ...profile.infoState,
-            coopeChallenge: cooperationChallengeEnabled() ? 1 : 0,
-          },
+          games: profile.games,
         },
       }
     );
@@ -2767,7 +4310,7 @@ export const myshopRegist: EPR = async (_info, data, send) => {
   const profiles = await DB.Find<Profile>(null, { collection: 'profile' });
   profiles.sort(
     (left, right) =>
-      (right.livePoint || 0) - (left.livePoint || 0) ||
+      profileTotalLivePoint(right) - profileTotalLivePoint(left) ||
       (left.__refid || '').localeCompare(right.__refid || '')
   );
   const entries = profiles.slice(0, 10).map((profile, index) =>
@@ -2779,19 +4322,19 @@ export const myshopRegist: EPR = async (_info, data, send) => {
           profile.did || didFromRefid(profile.__refid || String(index + 1))
         ),
         name: I('str', profile.name),
-        point: I('s32', profile.livePoint || 0),
+        point: I('s32', profileTotalLivePoint(profile)),
       }
     )
   );
   const playerIndex = profiles.findIndex(profile => profile.__refid === refid);
   const playerPoint =
-    playerIndex >= 0 ? profiles[playerIndex].livePoint || 0 : 0;
+    playerIndex >= 0 ? profileTotalLivePoint(profiles[playerIndex]) : 0;
   const shopChamp = {
     locationid: I('str', locationId),
     shopname: I('str', shopName),
     live_point: I(
       's32',
-      profiles.reduce((sum, profile) => sum + (profile.livePoint || 0), 0)
+      profiles.reduce((sum, profile) => sum + profileTotalLivePoint(profile), 0)
     ),
     rank: I('u32', 1),
     nr: I('u32', 1),
@@ -2867,7 +4410,9 @@ export const collaboCheck: EPR = async (_info, data, send) => {
     ? await DB.FindOne<CollaboState>({ collection: 'collabo_state', refid })
     : null;
   await send.object({
+    gfdm_j: I('bool', Boolean(state && state.gfdmRegistered)),
     j_gfdm: I('bool', Boolean(state && state.jubeatConfirmed)),
+    save_state: I('s32', Number(state ? state.saveState || 0 : 0)),
   });
 };
 
@@ -2910,6 +4455,143 @@ function renderShopTrial(trial: ShopTrial): any {
     ),
     is_valid: I('bool', trial.isValid),
   };
+}
+
+type ShopTrialEntryContext = {
+  cabid?: number;
+  round?: number;
+  refid?: string;
+  profile?: Profile | null;
+  requireValid?: boolean;
+};
+
+async function withShopTrialEntryLock(
+  key: string,
+  action: () => Promise<ShopTrialEntry>
+): Promise<ShopTrialEntry> {
+  const previous = shopTrialEntryQueues[key] || Promise.resolve();
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const tail = previous.then(() => gate, () => gate);
+  shopTrialEntryQueues[key] = tail;
+  try {
+    await previous.catch(() => undefined);
+    return await action();
+  } finally {
+    release();
+    if (shopTrialEntryQueues[key] === tail) delete shopTrialEntryQueues[key];
+  }
+}
+
+function shopTrialEntryRankedAt(entry: ShopTrialEntry): number {
+  const direct = Number(entry.rankedAt || entry.updatedAt || 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const parsed = Date.parse(String((entry as any).updatedAt || ''));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+async function upsertShopTrialEntry(
+  raw: any,
+  context: ShopTrialEntryContext = {}
+): Promise<ShopTrialEntry | null> {
+  if (!raw || !configBoolean('shop_trial_enabled', true)) return null;
+  const entry = $(raw);
+  if (context.requireValid && !entry.bool('is_valid')) return null;
+
+  const cabid = entry.number('cabid', context.cabid || 0);
+  const round = entry.number('round', context.round || 0);
+  const fallbackRefid = context.refid || refidFrom(entry.obj, 'refid');
+  const fallbackDid = context.profile && context.profile.did
+    ? context.profile.did
+    : fallbackRefid
+      ? didFromRefid(fallbackRefid)
+      : 0;
+  const uploadedDid = entry.number('did', fallbackDid);
+  if (fallbackDid > 0 && uploadedDid !== fallbackDid) return null;
+  const did = fallbackDid > 0 ? fallbackDid : uploadedDid;
+  const seqmode = entry.numbers('seqmode', []);
+  const points = entry.numbers('point', []);
+  if (
+    cabid <= 0 ||
+    round <= 0 ||
+    did <= 0 ||
+    seqmode.length !== 3 ||
+    points.length !== 3 ||
+    seqmode.some(
+      value => !Number.isFinite(value) || Math.floor(value) !== value || value < 0 || value > 8
+    ) ||
+    points.some(
+      value =>
+        !Number.isFinite(value) ||
+        Math.floor(value) !== value ||
+        value < 0 ||
+        value > 0x7fffffff
+    )
+  ) return null;
+
+  const pointTotal = points.reduce((sum, value) => sum + value, 0);
+  const uploadedTotal = entry.number('total_point', pointTotal);
+  if (
+    pointTotal > 0x7fffffff ||
+    !Number.isFinite(uploadedTotal) ||
+    Math.floor(uploadedTotal) !== uploadedTotal ||
+    uploadedTotal !== pointTotal
+  ) return null;
+
+  // A result must target a configuration that the cabinet could actually
+  // have loaded.  Never let a malformed gameend synthesize/overwrite the
+  // separate Shop Trial configuration document.
+  const trial = await DB.FindOne<ShopTrial>({
+    collection: 'shop_trial',
+    cabid,
+    round,
+  });
+  if (!trial || !trial.isValid) return null;
+
+  const incoming: ShopTrialEntry = {
+    collection: 'shop_trial_entry',
+    cabid,
+    round,
+    did,
+    refid: fallbackRefid,
+    name: entry.str(
+      'name',
+      context.profile ? context.profile.name : 'PLAYER'
+    ).slice(0, 12),
+    seqmode: seqmode.slice(),
+    point: points.slice(),
+    totalPoint: pointTotal,
+    result: entry.bool('result'),
+    isValid: true,
+    rankedAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  const query = { collection: 'shop_trial_entry' as const, cabid, round, did };
+  return withShopTrialEntryLock(`${cabid}:${round}:${did}`, async () => {
+    const previous = await DB.FindOne<ShopTrialEntry>(query);
+    const saved: ShopTrialEntry = previous && previous.totalPoint >= incoming.totalPoint
+      ? {
+          collection: 'shop_trial_entry',
+          cabid,
+          round,
+          did,
+          refid: incoming.refid || previous.refid || '',
+          name: incoming.name || previous.name || 'PLAYER',
+          seqmode: (previous.seqmode || incoming.seqmode).slice(0, 3),
+          point: (previous.point || incoming.point).slice(0, 3),
+          totalPoint: previous.totalPoint,
+          result: previous.result,
+          isValid: true,
+          rankedAt: shopTrialEntryRankedAt(previous) || incoming.rankedAt,
+          updatedAt: previous.updatedAt || incoming.updatedAt,
+        }
+      : incoming;
+    // Build the retained document field-by-field. DB.FindOne returns a NeDB
+    // document that also carries _id; spreading it into $set would attempt to
+    // modify the immutable identifier on lower/equal-score submissions.
+    await DB.Upsert<ShopTrialEntry>(query, { $set: saved });
+    return saved;
+  });
 }
 
 async function requestedShopTrial(data: any): Promise<ShopTrial> {
@@ -2975,33 +4657,15 @@ export const shopTrialRegist: EPR = async (_info, data, send) => {
   );
 
   const entry = (data as any).player ? root.element('player') : null;
-  const refid = entry ? refidFrom(entry.obj, 'refid') : '';
-  const did = entry ? entry.number('did', refid ? didFromRefid(refid) : 0) : 0;
-  const points = entry ? entry.numbers('point', []).slice(0, 3) : [];
-  if (entry && did > 0 && points.length) {
-    const seqmode = entry.numbers('seqmode', zeros(3)).slice(0, 3);
-    const profile = refid ? await findProfile(refid) : null;
-    const result: ShopTrialEntry = {
-      collection: 'shop_trial_entry',
+  if (entry) {
+    const refid = refidFrom(entry.obj, 'refid');
+    await upsertShopTrialEntry(entry.obj, {
       cabid,
       round,
-      did,
       refid,
-      name: entry.str('name', profile ? profile.name : 'PLAYER').slice(0, 12),
-      seqmode: seqmode.concat(zeros(Math.max(0, 3 - seqmode.length))),
-      point: points.concat(zeros(Math.max(0, 3 - points.length))),
-      totalPoint: entry.number(
-        'total_point',
-        points.reduce((sum, value) => sum + value, 0)
-      ),
-      result: entry.bool('result'),
-      isValid: true,
-      updatedAt: Date.now(),
-    };
-    await DB.Upsert<ShopTrialEntry>(
-      { collection: 'shop_trial_entry', cabid, round, did },
-      { $set: result }
-    );
+      profile: refid ? await findProfile(refid) : null,
+      requireValid: true,
+    });
   }
   await send.object(renderShopTrial(trial));
 };
@@ -3015,7 +4679,9 @@ export const shopTrialRankingGet: EPR = async (_info, data, send) => {
   });
   stored.sort(
     (left, right) =>
-      right.totalPoint - left.totalPoint || left.updatedAt - right.updatedAt
+      right.totalPoint - left.totalPoint ||
+      shopTrialEntryRankedAt(left) - shopTrialEntryRankedAt(right) ||
+      left.did - right.did
   );
   const ranking = stored.slice(0, 200).map(entry => ({
     did: I('s32', entry.did),

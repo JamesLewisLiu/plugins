@@ -1,19 +1,177 @@
 //DATA//
   profile: DB.FindOne(refid, { collection: 'profile' })
 
-section.section
+section.section#xg2-profile-admin(data-refid=refid)
   if profile
-    h3.title.is-4 GuitarFreaks / DrumMania XG2
-    form(method="post" action="/emit/xg2-change-name")
-      input(type="hidden" name="refid" value=refid)
-      .field
-        label.label Player name
+    h3.title.is-4 GuitarFreaks / DrumMania XG2 资料后台
+    p.subtitle.is-6 成绩与 Skill 只读；设置修改会在游戏下一次读取资料时生效。
+
+    article.message.is-info
+      .message-body#xg2-admin-status 正在读取成绩与设置……
+
+    .columns.is-multiline
+      .column.is-one-third
+        .box
+          h4.title.is-5 玩家名字
+          form#xg2-name-form(method="post" action="/emit/xg2-change-name")
+            input(type="hidden" name="refid" value=refid)
+            .field
+              .control
+                input.input(type="text" name="name" value=profile.name maxlength="12" required)
+              p.help 最多 12 个字符。
+            .field
+              .control
+                button.button.is-primary(type="submit") 保存名字
+
+      .column.is-one-third
+        .box
+          h4.title.is-5 游戏设置
+          form#xg2-settings-form(method="post" action="/emit/xg2-change-game-settings")
+            fieldset#xg2-settings-fields(disabled)
+              input(type="hidden" name="refid" value=refid)
+              .field
+                label.label(for="xg2-last-mode") 默认进入模式
+                .control
+                  .select.is-fullwidth
+                    select#xg2-last-mode(name="lastMode" required)
+                      option(value="0") Practice
+                      option(value="1") Standard
+                      option(value="2") Classic
+                p.help 这是已确认可安全回读的模式设置；其余 Custom 槽在下方只读显示。
+              .field
+                .control
+                  button.button.is-primary(type="submit") 保存游戏设置
+
+      .column.is-one-third
+        .box
+          h4.title.is-5 Group 图标
+          p#xg2-group-summary 尚未读取 Group。
+          form#xg2-group-form(method="post" action="/emit/xg2-change-group-icon")
+            fieldset#xg2-group-fields(disabled)
+              input(type="hidden" name="refid" value=refid)
+              .field
+                label.label(for="xg2-group-icon") 图标编号
+                .control
+                  .select.is-fullwidth
+                    select#xg2-group-icon(name="icon" required)
+                      option(value="0") 0
+                      option(value="1") 1
+                      option(value="2") 2
+                      option(value="3") 3
+                      option(value="4") 4
+                      option(value="5") 5
+                      option(value="6") 6
+                      option(value="7") 7
+                      option(value="8") 8
+                      option(value="9") 9
+                p.help#xg2-group-help 只有 Group 组长可以修改。
+              .field
+                .control
+                  button.button.is-primary(type="submit") 保存 Group 图标
+
+    .box
+      h4.title.is-5 K32 / K33 保存设置概览
+      .table-container
+        table.table.is-striped.is-narrow.is-fullwidth
+          thead
+            tr
+              th 机种
+              th Play count
+              th Live Point
+              th XG2+ LP
+              th Shutter
+              th Attack
+              th Judge
+              th Combo
+              th Notes
+          tbody#xg2-settings-body
+            tr
+              td(colspan="9") 正在读取……
+
+    .box
+      h4.title.is-5 Records 正式成绩（Standard / Classic）
+      .field.is-grouped.is-grouped-multiline
         .control
-          input.input(type="text" name="name" value=profile.name maxlength="12" required)
-        p.help Up to 12 characters. The new name is used on the next profile read.
-      .field
+          .select
+            select#xg2-record-game(disabled)
+              option(value="K33") K33 GuitarFreaks
+              option(value="K32") K32 DrumMania
         .control
-          button.button.is-primary(type="submit") Save name
+          .select
+            select#xg2-record-mode(disabled)
+              option(value="standard") XG / Standard
+              option(value="classic") Classic
+        .control
+          span.tag.is-info.is-medium#xg2-record-count 0 项
+      .table-container
+        table.table.is-striped.is-hoverable.is-narrow.is-fullwidth
+          thead
+            tr
+              th Music ID
+              th 曲名
+              th 谱面
+              th Score
+              th Achievement
+              th Rank
+              th Combo
+              th Skill
+              th Clear
+              th Plays
+          tbody#xg2-records-body
+            tr
+              td(colspan="10") 正在读取……
+
+    .box
+      h4.title.is-5 Skill 对象 / 构成
+      p.subtitle.is-6 Standard 为新曲 25 + 旧曲 25；Classic 为新曲 14 + 旧曲 36 + LONG 3。
+      .field.is-grouped.is-grouped-multiline
+        .control
+          .select
+            select#xg2-skill-game(disabled)
+              option(value="K33") K33 GuitarFreaks
+              option(value="K32") K32 DrumMania
+        .control
+          .select
+            select#xg2-skill-mode(disabled)
+              option(value="standard") XG / Standard
+              option(value="classic") Classic
+        .control
+          .select
+            select#xg2-skill-bucket(disabled)
+              option(value="newSongs") 新曲
+              option(value="oldSongs") 旧曲
+              option#xg2-skill-long-option(value="longSongs" hidden disabled) LONG
+      .columns.is-mobile.is-multiline
+        .column
+          p.heading Displayed Skill
+          p.title.is-5#xg2-skill-total —
+        .column
+          p.heading#xg2-skill-new-heading New Top 25
+          p.title.is-5#xg2-skill-new —
+        .column
+          p.heading#xg2-skill-old-heading Old Top 25
+          p.title.is-5#xg2-skill-old —
+        .column#xg2-skill-long-column(hidden)
+          p.heading#xg2-skill-long-heading LONG Top 3
+          p.title.is-5#xg2-skill-long —
+        .column
+          p.heading All point
+          p.title.is-5#xg2-skill-all —
+      .table-container
+        table.table.is-striped.is-hoverable.is-narrow.is-fullwidth
+          thead
+            tr
+              th 组内名次
+              th Music ID
+              th 曲名
+              th 最佳谱面
+              th Skill
+              th#xg2-skill-selected-heading Top 25
+          tbody#xg2-skill-body
+            tr
+              td(colspan="6") 正在读取……
+
+    script(src="static/js/profile_name.js")
   else
     article.message.is-warning
-      .message-body No GuitarFreaks / DrumMania XG2 profile exists for this card.
+      .message-body 此卡没有 GuitarFreaks / DrumMania XG2 资料。
