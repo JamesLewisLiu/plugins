@@ -1,10 +1,8 @@
 import {
   cardutilCheck,
   cardutilRegist,
-  changeProfileName,
   customizeRegist,
   demodataGet,
-  facilityGet,
   gameendRegist,
   gameinfoGet,
   gametopGet,
@@ -50,7 +48,7 @@ export function register() {
     desc: 'Enable the 15-day XG2+ LivePoint song campaign.',
     type: 'boolean',
     default: true,
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('xg2_plus_term', {
     name: 'XG2+ campaign day',
@@ -58,7 +56,7 @@ export function register() {
     type: 'integer',
     default: 15,
     range: [0, 15],
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('xg2_plus_unlock_policy', {
     name: 'XG2+ unlock policy',
@@ -66,7 +64,7 @@ export function register() {
     type: 'string',
     default: 'all_unlocked',
     options: ['all_unlocked', 'original_progression'],
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('xg_extra_rush_level', {
     name: 'XG EXTRA RUSH level',
@@ -74,7 +72,7 @@ export function register() {
     type: 'integer',
     default: 15,
     range: [0, 15],
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('live_point_term', {
     name: 'LivePoint term',
@@ -82,14 +80,14 @@ export function register() {
     type: 'integer',
     default: 6,
     range: [0, 6],
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('shop_trial_enabled', {
     name: 'Enable Shop Trial',
     desc: 'Enable each shop\'s three-song local event.',
     type: 'boolean',
     default: true,
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('shop_championship_term', {
     name: 'Shop Championship term',
@@ -97,7 +95,7 @@ export function register() {
     type: 'integer',
     default: 0,
     range: [0, 4],
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('group_competition_term', {
     name: 'Group Competition term',
@@ -105,22 +103,14 @@ export function register() {
     type: 'integer',
     default: 0,
     range: [0, 4],
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('cooperation_challenge_enabled', {
     name: 'Enable Cooperation Challenge',
     desc: 'Enable the recovered 26-event catalog and persist player/group progress.',
     type: 'boolean',
     default: true,
-    needRestart: false,
-  });
-  R.Config('cooperation_challenge_completion', {
-    name: 'Cooperation Challenge completion',
-    desc: 'completed reports each group challenge at its goal so the cleared state and already-granted prizes display; progression keeps real totals only.',
-    type: 'string',
-    default: 'completed',
-    options: ['completed', 'progression'],
-    needRestart: false,
+    needRestart: true,
   });
   R.Config('append_festival_mode', {
     name: 'APPEND FESTIVAL state',
@@ -128,50 +118,9 @@ export function register() {
     type: 'string',
     default: 'ended',
     options: ['off', 'active', 'ended'],
-    needRestart: false,
-  });
-  R.Config('eapass_valid_days', {
-    name: 'Play-data validity (days)',
-    desc: 'Number of days shown on the card-eject screen (1-999). The original archive target is 365.',
-    type: 'integer',
-    default: 365,
-    range: [1, 999],
-    needRestart: false,
-  });
-  R.Config('demo_music_id', {
-    name: 'Demo music ID',
-    desc: 'Music ID used by the server-configurable Demo patch.',
-    type: 'integer',
-    default: 1845,
-    range: [0, 99999],
-    needRestart: false,
-  });
-  R.Config('demo_sequence_mode', {
-    name: 'Demo sequence mode',
-    desc: 'Raw XG chart slot used by Demo; 1 is the stock REGULAR slot.',
-    type: 'integer',
-    default: 1,
-    range: [0, 8],
-    needRestart: false,
-  });
-  R.Config('demo_start_ms', {
-    name: 'Demo chart start (ms)',
-    desc: 'Chart playback start position in milliseconds.',
-    type: 'integer',
-    default: 58500,
-    range: [0, 600000],
-    needRestart: false,
-  });
-  R.Config('demo_duration_ms', {
-    name: 'Demo chart duration (ms)',
-    desc: 'Length of the playable Demo segment in milliseconds.',
-    type: 'integer',
-    default: 9800,
-    range: [300, 120000],
-    needRestart: false,
+    needRestart: true,
   });
 
-  R.Route('facility.get', traced('facility.get', facilityGet));
   R.Route('shopinfo.regist', traced('shopinfo.regist', shopRegist));
   R.Route('gameinfo.get', traced('gameinfo.get', gameinfoGet));
   R.Route('demodata.get', traced('demodata.get', demodataGet));
@@ -218,7 +167,6 @@ export function register() {
     traced('assert_report.regist', simpleSuccess)
   );
   R.Route('dlstatus.progress', traced('dlstatus.progress', simpleSuccess));
-  R.WebUIEvent('xg2-change-name', changeProfileName);
   R.Unhandled(logUnhandled);
 
   console.log('GFDM XG2 discovery plugin registered');
