@@ -15,7 +15,7 @@ All vibed, contains 0 lines of handwritten code.
 - Community Log(Comment and Challenge OK)
 - 店舗大会(Set this in SHOP EVENT by entering TEST MODE, the only way to experience 'X-PERFECT' (Colorful and Harder Perfect) )
 
-##Not (fully) Restored Function
+## Not (fully) Restored Function
 - Rival(Probably most people not willing to play this any more, only RivalID restored now)
 - All songs unlock event(Songs are force unlocked)
 - XG2+(Only title is showing in standby, songs are force unlocked)
