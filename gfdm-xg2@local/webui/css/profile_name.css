@@ -1,0 +1,125 @@
+#xg2-profile-admin .xg2-page-heading {
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+#xg2-profile-admin .xg2-page-heading .title:not(:last-child) {
+  margin-bottom: 0.35rem;
+}
+
+#xg2-profile-admin .xg2-page-heading .title + .subtitle {
+  margin-top: 0;
+}
+
+#xg2-profile-admin .xg2-equal-box {
+  height: 100%;
+}
+
+#xg2-profile-admin .xg2-group-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(92px, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+#xg2-profile-admin .xg2-group-icon-choice {
+  cursor: pointer;
+  position: relative;
+}
+
+#xg2-profile-admin .xg2-group-icon-radio {
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+#xg2-profile-admin .xg2-group-icon-card {
+  align-items: center;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+#xg2-profile-admin .xg2-group-icon-card img {
+  display: block;
+  height: 62px;
+  width: 62px;
+}
+
+#xg2-profile-admin .xg2-group-icon-choice:hover .xg2-group-icon-card {
+  border-color: #b5b5b5;
+  transform: translateY(-1px);
+}
+
+#xg2-profile-admin .xg2-group-icon-radio:focus + .xg2-group-icon-card {
+  box-shadow: 0 0 0 3px rgba(50, 115, 220, 0.3);
+}
+
+#xg2-profile-admin .xg2-group-icon-radio:checked + .xg2-group-icon-card {
+  border-color: #3273dc;
+  box-shadow: 0 0 0 2px rgba(50, 115, 220, 0.15);
+}
+
+#xg2-profile-admin fieldset:disabled .xg2-group-icon-choice {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+#xg2-profile-admin .xg2-ability {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.55rem;
+  min-width: 160px;
+}
+
+#xg2-profile-admin .xg2-ability-value {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+#xg2-profile-admin .xg2-ability-icon {
+  align-items: center;
+  display: flex;
+  flex: 0 0 54px;
+  flex-direction: column;
+  height: 70px;
+  line-height: 0;
+  width: 54px;
+}
+
+#xg2-profile-admin .xg2-ability-emblem,
+#xg2-profile-admin .xg2-ability-label {
+  display: block;
+  width: 54px;
+}
+
+#xg2-profile-admin .xg2-ability-emblem {
+  height: 60px;
+}
+
+#xg2-profile-admin .xg2-ability-label {
+  height: 10px;
+}
+
+#xg2-profile-admin td,
+#xg2-profile-admin th {
+  vertical-align: middle;
+}
+
+@media screen and (max-width: 768px) {
+  #xg2-profile-admin .xg2-page-heading {
+    display: block;
+  }
+
+  #xg2-profile-admin .xg2-page-heading .level-right {
+    margin-top: 1rem;
+  }
+
+  #xg2-profile-admin .xg2-group-icon-grid {
+    grid-template-columns: repeat(2, minmax(92px, 1fr));
+  }
+}

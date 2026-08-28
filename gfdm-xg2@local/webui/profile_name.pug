@@ -1,0 +1,193 @@
+//DATA//
+  profile: DB.FindOne(refid, { collection: 'profile' })
+
+- const recordsView = query && query.view === 'records'
+
+link(rel="stylesheet" href="static/css/profile_name.css")
+
+section.section#xg2-profile-admin(data-refid=refid data-view=recordsView ? "records" : "profile")
+  if profile
+    if recordsView
+      .level.is-mobile.xg2-page-heading
+        .level-left
+          .level-item
+            div
+              h3.title.is-4 GuitarFreaks / DrumMania XG2 Records
+              p.subtitle.is-6 STANDARD and V8/Classic play records.
+        .level-right
+          .level-item
+            a.button.is-light(href="/plugin/gfdm-xg2@local/profile?refid=" + refid) Back to Profile
+
+      article.message.is-info
+        .message-body#xg2-admin-status Loading records…
+
+      .box
+        .field.is-grouped.is-grouped-multiline
+          .control
+            .select
+              select#xg2-record-game(disabled aria-label="Game")
+                option(value="K33") GuitarFreaks
+                option(value="K32") DrumMania
+          .control
+            .select
+              select#xg2-record-mode(disabled aria-label="Mode")
+                option(value="standard") STANDARD
+                option(value="classic") V8/Classic
+          .control
+            span.tag.is-info.is-medium#xg2-record-count 0 records
+        .table-container
+          table.table.is-striped.is-hoverable.is-narrow.is-fullwidth
+            thead
+              tr
+                th Music ID
+                th Song
+                th Chart
+                th Score
+                th Achievement
+                th Rank
+                th Combo
+                th Skill
+                th Clear
+                th Plays
+            tbody#xg2-records-body
+              tr
+                td(colspan="10") Loading…
+    else
+      .level.is-mobile.xg2-page-heading
+        .level-left
+          .level-item
+            div
+              h3.title.is-4 GuitarFreaks / DrumMania XG2 Profile
+              p.subtitle.is-6 Scores and Skill Data are read-only. Setting changes take effect the next time the game loads this profile.
+        .level-right
+          .level-item
+            a.button.is-link(href="/plugin/gfdm-xg2@local/profile?refid=" + refid + "&view=records") View Score
+
+      article.message.is-info
+        .message-body#xg2-admin-status Loading profile data…
+
+      .columns.is-multiline
+        .column.is-half
+          .box.xg2-equal-box
+            h4.title.is-5 Player Name
+            form#xg2-name-form(method="post" action="/emit/xg2-change-name")
+              input(type="hidden" name="refid" value=refid)
+              .field
+                .control
+                  input.input(type="text" name="name" value=profile.name maxlength="11" required)
+                p.help Up to 11 characters.
+              .field
+                .control
+                  button.button.is-primary(type="submit") Save Name
+
+        .column.is-half
+          .box.xg2-equal-box
+            h4.title.is-5 Game Settings
+            form#xg2-settings-form(method="post" action="/emit/xg2-change-game-settings")
+              fieldset#xg2-settings-fields(disabled)
+                input(type="hidden" name="refid" value=refid)
+                .field
+                  label.label(for="xg2-last-mode") Default Mode
+                  .control
+                    .select.is-fullwidth
+                      select#xg2-last-mode(name="lastMode" required)
+                        option(value="0") PRACTICE
+                        option(value="1") STANDARD
+                        option(value="2") CLASSIC
+                  p.help This confirmed setting supports safe write-back.
+                .field
+                  .control
+                    button.button.is-primary(type="submit") Save Game Settings
+
+      .box
+        h4.title.is-5 Group Icon
+        p#xg2-group-summary Group not loaded yet.
+        form#xg2-group-form(method="post" action="/emit/xg2-change-group-icon")
+          fieldset#xg2-group-fields(disabled)
+            input(type="hidden" name="refid" value=refid)
+            .field
+              label.label Select an Icon
+              .xg2-group-icon-grid
+                each icon in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+                  label.xg2-group-icon-choice
+                    input.xg2-group-icon-radio(type="radio" name="icon" value=icon required)
+                    span.xg2-group-icon-card
+                      img(data-xg2-group-icon=icon alt="Group icon " + icon)
+                      span No. #{icon}
+              p.help#xg2-group-help Only the Group owner can change this setting.
+            .field
+              .control
+                button.button.is-primary(type="submit") Save Group Icon
+
+      .box
+        h4.title.is-5 Personal Information
+        .table-container
+          table.table.is-striped.is-narrow.is-fullwidth
+            thead
+              tr
+                th Game
+                th Play Count
+                th Live Point
+                th STANDARD SKILL
+                th V8/Classic SKILL
+                th Ability
+            tbody#xg2-profile-body
+              tr
+                td(colspan="6") Loading…
+
+      .box
+        h4.title.is-5 Skill Data
+        p.subtitle.is-6 STANDARD uses 25 HOT + 25 OTHER songs; V8/Classic uses 14 HOT + 36 OTHER + 3 LONG songs.
+        .field.is-grouped.is-grouped-multiline
+          .control
+            .select
+              select#xg2-skill-game(disabled aria-label="Game")
+                option(value="K33") GuitarFreaks
+                option(value="K32") DrumMania
+          .control
+            .select
+              select#xg2-skill-mode(disabled aria-label="Mode")
+                option(value="standard") STANDARD
+                option(value="classic") V8/Classic
+          .control
+            .select
+              select#xg2-skill-bucket(disabled aria-label="Skill category")
+                option(value="newSongs") HOT
+                option(value="oldSongs") OTHER
+                option#xg2-skill-long-option(value="longSongs" hidden disabled) LONG
+        .columns.is-mobile.is-multiline
+          .column
+            p.heading Displayed Skill
+            p.title.is-5#xg2-skill-total —
+          .column
+            p.heading#xg2-skill-new-heading HOT Top 25
+            p.title.is-5#xg2-skill-new —
+          .column
+            p.heading#xg2-skill-old-heading OTHER Top 25
+            p.title.is-5#xg2-skill-old —
+          .column#xg2-skill-long-column(hidden)
+            p.heading#xg2-skill-long-heading LONG Top 3
+            p.title.is-5#xg2-skill-long —
+          .column
+            p.heading All Point
+            p.title.is-5#xg2-skill-all —
+        .table-container
+          table.table.is-striped.is-hoverable.is-narrow.is-fullwidth
+            thead
+              tr
+                th No.
+                th Music ID
+                th Song
+                th Best Chart
+                th Rate
+                th Skill
+                th#xg2-skill-selected-heading Top 25
+            tbody#xg2-skill-body
+              tr
+                td(colspan="7") Loading…
+
+    script(src="static/js/profile_icon_data.js")
+    script(src="static/js/profile_name.js")
+  else
+    article.message.is-warning
+      .message-body This card does not have a GuitarFreaks / DrumMania XG2 profile.
